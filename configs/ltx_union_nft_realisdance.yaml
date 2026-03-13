@@ -4,7 +4,7 @@
 
 launcher: "accelerate"
 config_file: null
-num_processes: 8
+num_processes: 1
 main_process_port: 29500
 mixed_precision: "bf16"
 
@@ -14,9 +14,9 @@ logging_backend: "clearml"
 
 model:
   model_type: "ltx-union"
-  model_name_or_path: "/path/to/ltx-2.3-22b-checkpoint.safetensors"
-  union_lora_path: "/path/to/IC-LoRA-Union-Control.safetensors"
-  gemma_path: "/path/to/gemma-model"
+  model_name_or_path: "/home/ubuntu/comfy/ComfyUI/models/checkpoints/ltx-2-19b-distilled.safetensors"
+  union_lora_path: "/home/ubuntu/comfy/ComfyUI/models/loras/ltx-2-19b-ic-lora-union-control-ref0.5.safetensors"
+  gemma_path: "/home/ubuntu/comfy/ComfyUI/models/text_encoders/gemma3"
   finetune_type: "lora"
   target_components: ["transformer"]
   lora_rank: 64
@@ -86,5 +86,5 @@ rewards:
     batch_size: 4
     device: "cuda"
     dtype: "bfloat16"
-    gvhmr_root: "/data/GVHMR"
+    gvhmr_root: "/home/ubuntu/Uni3C/third_party/GVHMR_realisdance"
     gt_joints_path: "/home/ubuntu/RealisDance-Val/gt_joints.pt"

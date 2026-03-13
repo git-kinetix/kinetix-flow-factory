@@ -2,13 +2,14 @@
 RealisDance-Val Dataset Preparation for LTX Union NFT Training.
 
 Usage (on RD-H200-2):
-    python scripts/prepare_realisdance.py \
+    PYTHONPATH=/home/ubuntu/DiffusionNFT_project python scripts/prepare_realisdance.py \
         --dataset-root /home/ubuntu/RealisDance-Val \
-        --gvhmr-root /data/GVHMR \
+        --gvhmr-root /home/ubuntu/Uni3C/third_party/GVHMR_realisdance \
         --output-jsonl /home/ubuntu/RealisDance-Val/train.jsonl \
         --output-joints /home/ubuntu/RealisDance-Val/gt_joints.pt
 """
 import argparse
+import csv
 import json
 import os
 import sys
@@ -19,25 +20,38 @@ import numpy as np
 
 
 def scan_dataset(dataset_root: str) -> list[dict]:
-    """Scan RealisDance-Val directory and build sample entries."""
+    """Scan RealisDance-Val directory and build sample entries.
+
+    Actual dataset layout on RD-H200-2:
+        gt/            — ground-truth videos (0001.mp4, ...)
+        ref/           — reference images (0001.png, ...)
+        vace_conditioning/ — condition videos for IC-LoRA (0001.mp4, ...)
+        prompts.csv    — id,prompt columns
+    """
     root = Path(dataset_root)
     samples = []
 
-    video_dir = root / "videos"
-    condition_dir = root / "condition" / "pose_depth"
-    ref_image_dir = root / "ref_images"
-    prompt_file = root / "prompts.json"
+    gt_dir = root / "gt"
+    condition_dir = root / "vace_conditioning"
+    ref_image_dir = root / "ref"
+    prompt_file = root / "prompts.csv"
 
+    # Load prompts from CSV (id,prompt)
     prompts = {}
     if prompt_file.exists():
-        with open(prompt_file) as f:
+        with open(prompt_file, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                prompts[row["id"]] = row["prompt"]
+    elif (root / "prompts.json").exists():
+        with open(root / "prompts.json") as f:
             prompts = json.load(f)
 
-    if not video_dir.exists():
-        print(f"Warning: {video_dir} not found, scanning root for videos")
-        video_dir = root
+    if not gt_dir.exists():
+        print(f"Warning: {gt_dir} not found, scanning root for videos")
+        gt_dir = root
 
-    for video_path in sorted(video_dir.glob("*.mp4")):
+    for video_path in sorted(gt_dir.glob("*.mp4")):
         video_id = video_path.stem
         cond_path = condition_dir / f"{video_id}.mp4"
         if not cond_path.exists():
@@ -49,7 +63,7 @@ def scan_dataset(dataset_root: str) -> list[dict]:
             # "video" field is the condition video — loaded by dataset and
             # passed to encode_video() → reference_latents for IC-LoRA
             "video": str(cond_path.relative_to(root)),
-            "prompt": prompts.get(video_id, f"A person performing an action"),
+            "prompt": prompts.get(video_id, "A person performing an action"),
             # GT video path stored for reference (not loaded by dataset)
             "gt_video": str(video_path.relative_to(root)),
         }
@@ -104,7 +118,7 @@ def precompute_gt_joints(
 def main():
     parser = argparse.ArgumentParser(description="Prepare RealisDance-Val dataset")
     parser.add_argument("--dataset-root", required=True)
-    parser.add_argument("--gvhmr-root", default="/data/GVHMR")
+    parser.add_argument("--gvhmr-root", default="/home/ubuntu/Uni3C/third_party/GVHMR_realisdance")
     parser.add_argument("--output-jsonl", default=None)
     parser.add_argument("--output-joints", default=None)
     parser.add_argument("--skip-joints", action="store_true")
