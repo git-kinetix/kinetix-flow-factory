@@ -32,6 +32,13 @@ class PickScoreRewardModel(PointwiseRewardModel):
         self.processor = CLIPProcessor.from_pretrained(processor_path)
         self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
 
+    @staticmethod
+    def _extract_features(output):
+        """Extract tensor from model output (handles transformers v5+ output objects)."""
+        if isinstance(output, torch.Tensor):
+            return output
+        return output.pooler_output
+
     def _compute_scores_batch(
         self,
         prompt: list[str],
@@ -40,13 +47,10 @@ class PickScoreRewardModel(PointwiseRewardModel):
         """Compute PickScore for a batch of image-prompt pairs."""
         image_inputs = self.processor(
             images=image,
-            padding=True,
-            truncation=True,
-            max_length=77,
             return_tensors="pt",
         )
         image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
-        
+
         text_inputs = self.processor(
             text=prompt,
             padding=True,
@@ -55,13 +59,13 @@ class PickScoreRewardModel(PointwiseRewardModel):
             return_tensors="pt",
         )
         text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
-        
-        image_embs = self.model.get_image_features(**image_inputs)
+
+        image_embs = self._extract_features(self.model.get_image_features(**image_inputs))
         image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)
-        
-        text_embs = self.model.get_text_features(**text_inputs)
+
+        text_embs = self._extract_features(self.model.get_text_features(**text_inputs))
         text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
-        
+
         logit_scale = self.model.logit_scale.exp()
         scores = logit_scale * (text_embs * image_embs).sum(dim=-1)
         return scores
@@ -125,15 +129,22 @@ class PickScoreRewardModel(PointwiseRewardModel):
 
 class PickScoreRankRewardModel(GroupwiseRewardModel):
     """Ranking-based reward model using PickScore with video support."""
-    
+
     required_fields = ("prompt", "image", "video")
-    
+
     def __init__(self, config: RewardArguments, accelerator: Accelerator):
         super().__init__(config, accelerator)
         processor_path = "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
         model_path = "yuvalkirstain/PickScore_v1"
         self.processor = CLIPProcessor.from_pretrained(processor_path)
         self.model = CLIPModel.from_pretrained(model_path).eval().to(self.device)
+
+    @staticmethod
+    def _extract_features(output):
+        """Extract tensor from model output (handles transformers v5+ output objects)."""
+        if isinstance(output, torch.Tensor):
+            return output
+        return output.pooler_output
 
     def _compute_scores_batch(
         self,
@@ -143,13 +154,10 @@ class PickScoreRankRewardModel(GroupwiseRewardModel):
         """Compute PickScore for a batch of image-prompt pairs."""
         image_inputs = self.processor(
             images=image,
-            padding=True,
-            truncation=True,
-            max_length=77,
             return_tensors="pt",
         )
         image_inputs = {k: v.to(device=self.device) for k, v in image_inputs.items()}
-        
+
         text_inputs = self.processor(
             text=prompt,
             padding=True,
@@ -158,13 +166,13 @@ class PickScoreRankRewardModel(GroupwiseRewardModel):
             return_tensors="pt",
         )
         text_inputs = {k: v.to(device=self.device) for k, v in text_inputs.items()}
-        
-        image_embs = self.model.get_image_features(**image_inputs)
+
+        image_embs = self._extract_features(self.model.get_image_features(**image_inputs))
         image_embs = image_embs / image_embs.norm(p=2, dim=-1, keepdim=True)
-        
-        text_embs = self.model.get_text_features(**text_inputs)
+
+        text_embs = self._extract_features(self.model.get_text_features(**text_inputs))
         text_embs = text_embs / text_embs.norm(p=2, dim=-1, keepdim=True)
-        
+
         logit_scale = self.model.logit_scale.exp()
         scores = logit_scale * (text_embs * image_embs).sum(dim=-1)
         return scores

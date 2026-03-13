@@ -193,8 +193,15 @@ class LTXUnionAdapter(BaseAdapter):
         device = self.device
 
         # Handle pre-batched tensor input (B, C, T, H, W)
+        # Detect encoder dtype from parameters (nn.Module has no .dtype attr)
+        enc_dtype = getattr(vae_encoder, "dtype", None)
+        if enc_dtype is None:
+            try:
+                enc_dtype = next(vae_encoder.parameters()).dtype
+            except StopIteration:
+                enc_dtype = None
+
         if isinstance(videos, torch.Tensor):
-            enc_dtype = getattr(vae_encoder, "dtype", None)
             video_tensor = videos.to(device=device)
             if isinstance(enc_dtype, torch.dtype):
                 video_tensor = video_tensor.to(dtype=enc_dtype)
@@ -218,7 +225,6 @@ class LTXUnionAdapter(BaseAdapter):
                 t = TF.to_tensor(frame)
                 tensors.append(t)
             video_tensor = torch.stack(tensors, dim=1).unsqueeze(0)
-            enc_dtype = getattr(vae_encoder, "dtype", None)
             video_tensor = video_tensor.to(device=device)
             if isinstance(enc_dtype, torch.dtype):
                 video_tensor = video_tensor.to(dtype=enc_dtype)
