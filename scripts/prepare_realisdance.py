@@ -80,7 +80,7 @@ def precompute_gt_joints(
 
     for i, sample in enumerate(samples):
         video_id = sample["video_id"]
-        video_path = os.path.join(dataset_root, sample["video"])
+        video_path = os.path.join(dataset_root, sample["gt_video"])
         print(f"[{i+1}/{len(samples)}] Processing {video_id}...")
         try:
             import imageio

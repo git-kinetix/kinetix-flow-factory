@@ -14,8 +14,20 @@
 
 # src/flow_factory/logger/clearml.py
 from typing import Any, Dict, Optional
+
+import torch
+
 from .abc import Logger
 from .formatting import LogImage, LogVideo, LogTable
+
+
+def _to_scalar(v: Any) -> Optional[float]:
+    """Convert int, float, or torch.Tensor scalar to Python float."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, torch.Tensor) and v.numel() == 1:
+        return v.detach().cpu().item()
+    return None
 
 
 class ClearMLLogger(Logger):
@@ -70,13 +82,16 @@ class ClearMLLogger(Logger):
             return
 
         if not isinstance(value, tuple):
-            if isinstance(value, (int, float)):
-                self.platform.report_scalar(title=key, series="value", value=value, iteration=step)
+            scalar = _to_scalar(value)
+            if scalar is not None:
+                self.platform.report_scalar(title=key, series="value", value=scalar, iteration=step)
             return
 
         dtype, *args = value
-        if dtype == 'scalar' and isinstance(args[0], (int, float)):
-            self.platform.report_scalar(title=key, series="value", value=args[0], iteration=step)
+        if dtype == 'scalar':
+            scalar = _to_scalar(args[0])
+            if scalar is not None:
+                self.platform.report_scalar(title=key, series="value", value=scalar, iteration=step)
         elif dtype == 'image':
             path, caption = args[0], args[1]
             series = caption or "image"

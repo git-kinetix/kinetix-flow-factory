@@ -169,7 +169,7 @@ class LTXUnionAdapter(BaseAdapter):
             "prompt_ids": tokenized.input_ids.to(device),
             "prompt_embeds": video_features.to(device=device),
             "prompt_attention_mask": attention_mask.to(device),
-            "_audio_prompt_embeds": audio_features.to(device=device),
+            "audio_prompt_embeds": audio_features.to(device=device),
         }
 
     def encode_image(
@@ -398,7 +398,7 @@ class LTXUnionAdapter(BaseAdapter):
         additive_mask = convert_to_additive_mask(prompt_attention_mask, dtype=dtype)
         video_context, _, _ = embeddings_processor.create_embeddings(
             prompt_embeds,
-            kwargs.get("_audio_prompt_embeds", prompt_embeds),
+            kwargs.get("audio_prompt_embeds", prompt_embeds),
             additive_mask,
         )
 
@@ -482,7 +482,7 @@ class LTXUnionAdapter(BaseAdapter):
             prompt_embeds = encoded["prompt_embeds"]
             prompt_ids = encoded["prompt_ids"]
             prompt_attention_mask = encoded["prompt_attention_mask"]
-            kwargs["_audio_prompt_embeds"] = encoded.get("_audio_prompt_embeds")
+            kwargs["audio_prompt_embeds"] = encoded.get("audio_prompt_embeds")
 
         batch_size = prompt_embeds.shape[0]
         prompt = [prompt] if isinstance(prompt, str) else prompt
