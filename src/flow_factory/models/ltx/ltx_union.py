@@ -345,7 +345,6 @@ class LTXUnionAdapter(BaseAdapter):
         from ltx_core.model.transformer.modality import Modality
         from ltx_core.types import VideoLatentShape, VIDEO_SCALE_FACTORS
         from ltx_core.components.patchifiers import get_pixel_coords
-        from ltx_core.text_encoders.gemma import convert_to_additive_mask
 
         batch_size = latents.shape[0]
         device = latents.device
@@ -423,25 +422,18 @@ class LTXUnionAdapter(BaseAdapter):
         positions = positions.to(dtype=torch.float32)
         positions[:, 0, ...] = positions[:, 0, ...] / fps
 
-        # 5. Apply embeddings processor connectors (block 3)
-        # C6 fix: convert binary mask → additive mask for transformer attention
-        embeddings_processor = self.get_component_unwrapped("embeddings_processor")
-        additive_mask = convert_to_additive_mask(prompt_attention_mask, dtype=dtype)
-        video_context, _, _ = embeddings_processor.create_embeddings(
-            prompt_embeds,
-            kwargs.get("audio_prompt_embeds", prompt_embeds),
-            additive_mask,
-        )
-
-        # 6. Build Modality
+        # 5. Build Modality
+        # prompt_embeds are already processed by encode_prompt (text_encoder.encode
+        # + embeddings_processor.process_hidden_states → video_encoding).
+        # Use them directly as context — do NOT re-apply create_embeddings.
         modality = Modality(
             enabled=True,
             latent=combined,
             sigma=sigma_batch,
             timesteps=per_token_timesteps,
             positions=positions,
-            context=video_context,
-            context_mask=prompt_attention_mask,
+            context=prompt_embeds,
+            context_mask=None,  # ltx_trainer uses None after processing
         )
 
         # 7. Transformer forward
