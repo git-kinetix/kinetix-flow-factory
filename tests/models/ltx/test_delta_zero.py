@@ -88,8 +88,6 @@ class TestDeltaZeroTransformerStep:
         self.pipeline.transformer.eval()
         yield
         del self.pipeline
-        gc.collect()
-        torch.cuda.empty_cache()
 
     def test_same_input_same_output(self):
         from ltx_core.model.transformer.modality import Modality
