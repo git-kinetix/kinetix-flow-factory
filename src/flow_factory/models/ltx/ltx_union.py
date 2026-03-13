@@ -314,7 +314,7 @@ class LTXUnionAdapter(BaseAdapter):
         # Latent state (5D unpatchified from NFT trainer)
         latents: Optional[torch.Tensor] = None,
         next_latents: Optional[torch.Tensor] = None,
-        # Reference latents (3D patchified)
+        # Reference latents: 5D [B,C,F,H,W] or 3D [B,seq,C] patchified
         reference_latents: Optional[torch.Tensor] = None,
         ref_seq_len: Optional[int] = None,
         # Conditioning
@@ -362,10 +362,20 @@ class LTXUnionAdapter(BaseAdapter):
         if next_latents is not None:
             next_latents_3d = patchifier.patchify(next_latents)
 
-        # 2. Concatenate reference + target
+        # 2. Handle reference latents: accept 5D or 3D
         assert reference_latents is not None, "reference_latents required for IC-LoRA"
-        seq_ref = reference_latents.shape[1]
-        combined = torch.cat([reference_latents, target_latents_3d], dim=1)
+        if reference_latents.ndim == 5:
+            # 5D: [B, C, F_ref, H_ref, W_ref] — extract shape then patchify
+            _, _, F_ref, H_ref, W_ref = reference_latents.shape
+            ref_latents_3d = patchifier.patchify(reference_latents)
+        else:
+            # 3D: already patchified, shape info passed via kwargs
+            ref_latents_3d = reference_latents
+            F_ref = kwargs.get("ref_F", latents.shape[2])
+            H_ref = kwargs.get("ref_H", latents.shape[3] // self.reference_downscale_factor)
+            W_ref = kwargs.get("ref_W", latents.shape[4] // self.reference_downscale_factor)
+        seq_ref = ref_latents_3d.shape[1]
+        combined = torch.cat([ref_latents_3d, target_latents_3d], dim=1)
 
         # 3. Build per-token timesteps
         sigma = t / 1000.0
@@ -379,10 +389,8 @@ class LTXUnionAdapter(BaseAdapter):
         target_ts = sigma_batch.unsqueeze(1).expand(batch_size, seq_target)
         per_token_timesteps = torch.cat([ref_ts, target_ts], dim=1)
 
-        # 4. Build positions using VideoLatentShape (C2 fix)
+        # 4. Build positions from actual latent shapes
         _, _, F_lat, H_lat, W_lat = latents.shape
-        ref_H = H_lat // self.reference_downscale_factor
-        ref_W = W_lat // self.reference_downscale_factor
 
         target_shape = VideoLatentShape(
             batch=batch_size, channels=128, frames=F_lat,
@@ -393,13 +401,14 @@ class LTXUnionAdapter(BaseAdapter):
         )
 
         ref_shape = VideoLatentShape(
-            batch=batch_size, channels=128, frames=F_lat,
-            height=ref_H, width=ref_W,
+            batch=batch_size, channels=128, frames=F_ref,
+            height=H_ref, width=W_ref,
         )
         ref_positions = patchifier.get_patch_grid_bounds(
             ref_shape, device=device,
         )
 
+        # Scale reference positions to match target coordinate space
         if self.reference_downscale_factor != 1:
             ref_positions = ref_positions.clone()
             ref_positions[:, 1, ...] *= self.reference_downscale_factor
@@ -527,9 +536,21 @@ class LTXUnionAdapter(BaseAdapter):
         latent_shape = (batch_size, 128, F_lat, H_lat, W_lat)
         latents = randn_tensor(latent_shape, generator=generator, device=device, dtype=torch.bfloat16)
 
-        # 3. Patchify reference latents
+        # 3. Downscale reference latents to match IC-LoRA training resolution
         patchifier = self.get_component_unwrapped("patchifier")
         assert reference_latents is not None, "reference_latents required for IC-LoRA"
+        if self.reference_downscale_factor > 1 and reference_latents.ndim == 5:
+            B_r, C_r, F_r, H_r, W_r = reference_latents.shape
+            H_ds = H_r // self.reference_downscale_factor
+            W_ds = W_r // self.reference_downscale_factor
+            # Spatial-only resize: reshape to [B*C, F, H, W] for interpolate
+            ref_flat = reference_latents.reshape(B_r * C_r, F_r, H_r, W_r)
+            ref_flat = torch.nn.functional.interpolate(
+                ref_flat.float(), size=(F_r, H_ds, W_ds), mode="trilinear",
+                align_corners=False,
+            ).to(reference_latents.dtype)
+            reference_latents = ref_flat.reshape(B_r, C_r, F_r, H_ds, W_ds)
+
         ref_latents_3d = patchifier.patchify(reference_latents)
         seq_ref = ref_latents_3d.shape[1]
 
@@ -562,7 +583,7 @@ class LTXUnionAdapter(BaseAdapter):
                 t=t,
                 t_next=t_next,
                 latents=latents,
-                reference_latents=ref_latents_3d,
+                reference_latents=reference_latents,  # 5D
                 ref_seq_len=seq_ref,
                 prompt_embeds=prompt_embeds,
                 prompt_attention_mask=prompt_attention_mask,
@@ -604,7 +625,6 @@ class LTXUnionAdapter(BaseAdapter):
                 height=height,
                 width=width,
                 prompt=prompt[b] if prompt else "",
-                prompt_ids=prompt_ids[b] if prompt_ids is not None else None,
                 prompt_embeds=prompt_embeds[b],
                 ref_seq_len=seq_ref,
                 video_id=video_id[b],
