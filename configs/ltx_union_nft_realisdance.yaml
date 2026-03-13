@@ -3,9 +3,12 @@
 # Target: RD-H200-2
 
 launcher: "accelerate"
+config_file: null
 num_processes: 8
+main_process_port: 29500
 mixed_precision: "bf16"
 
+run_name: null
 project: "LTX-Union-NFT-RealisDance"
 logging_backend: "clearml"
 
@@ -20,9 +23,10 @@ model:
   lora_alpha: 64
 
 data:
-  dataset: "/home/ubuntu/RealisDance-Val"
-  # video_dir must be dataset root because JSONL paths are relative to root
+  dataset_dir: "/home/ubuntu/RealisDance-Val"
+  # video_dir and image_dir must be dataset root because JSONL paths are relative to root
   video_dir: "/home/ubuntu/RealisDance-Val"
+  image_dir: "/home/ubuntu/RealisDance-Val"
   enable_preprocess: true
   preprocessing_batch_size: 4
 
@@ -54,12 +58,26 @@ train:
   height: 256
   width: 416
   num_frames: 33
+  # Optimization
+  seed: 42
+  adam_betas: [0.9, 0.999]
+  adam_epsilon: 1.0e-8
+  max_grad_norm: 1.0
+  gradient_step_per_epoch: 1
+
+log:
+  save_dir: "/home/ubuntu/flow-factory-output"
+  save_freq: 5
+  save_model_only: true
 
 eval:
   height: 512
   width: 832
   num_frames: 33
-  eval_interval: 5
+  eval_freq: 5
+  per_device_batch_size: 1
+  num_inference_steps: 50
+  seed: 42
 
 rewards:
   - name: "mpjpe"

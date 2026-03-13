@@ -105,7 +105,8 @@ class EvaluationArguments(ArgABC):
                     f"Both `resolution={self.resolution}` and `width={self.width}` are set. "
                     f"Using width to override: ({self.resolution[0]}, {self.width})."
                 )
-        
+                self.resolution = (self.resolution[0], self.width)
+
         # Final assignment
         self.height, self.width = self.resolution
 
@@ -311,6 +312,7 @@ class TrainingArguments(ArgABC):
                     f"Both `resolution={self.resolution}` and `width={self.width}` are set. "
                     f"Using width to override: ({self.resolution[0]}, {self.width})."
                 )
+                self.resolution = (self.resolution[0], self.width)
 
         # num_train_timesteps
         if self.num_train_timesteps <= 0:

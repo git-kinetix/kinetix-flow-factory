@@ -60,7 +60,7 @@ class ModelArguments(ArgABC):
         metadata={"help": "Which layers to fine-tune. Options are like ['all',  'default', 'to_q', ['to_q', 'to_k', 'to_v']]"}
     )
 
-    model_type: Literal["sd3", "flux1", "flux1-kontext", 'flux2', 'qwenimage', 'qwenimage-edit', 'z-image'] = field(
+    model_type: Literal["sd3", "flux1", "flux1-kontext", 'flux2', 'qwenimage', 'qwenimage-edit', 'z-image', 'ltx-union', 'wan2_t2v'] = field(
         default="flux1",
         metadata={"help": "Type of model to use."},
     )
