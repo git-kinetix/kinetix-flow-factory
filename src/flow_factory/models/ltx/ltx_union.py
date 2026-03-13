@@ -148,29 +148,44 @@ class LTXUnionAdapter(BaseAdapter):
         dtype: Optional[torch.dtype] = None,
         **kwargs,
     ) -> Dict[str, Union[List[Any], torch.Tensor]]:
-        """Encode text prompts via Gemma blocks 1+2 (precompute path)."""
+        """Encode text prompts via Gemma text_encoder + embeddings_processor.
+
+        Two-stage encoding:
+        1. text_encoder.encode(text) → raw hidden states + attention mask
+        2. embeddings_processor.process_hidden_states() → video/audio embeddings
+        """
         device = device or self.device
         prompt = [prompt] if isinstance(prompt, str) else prompt
 
         text_encoder = self.get_component_unwrapped("text_encoder")
-        video_features, audio_features, attention_mask = text_encoder.precompute(
-            prompt, padding_side="left"
-        )
+        embeddings_processor = self.get_component_unwrapped("embeddings_processor")
 
-        tokenizer = text_encoder.tokenizer
-        tokenized = tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=max_sequence_length,
-            truncation=True,
-            return_tensors="pt",
+        # Ensure components are on the right device
+        text_encoder.to(device)
+        embeddings_processor.to(device)
+
+        video_encs, audio_encs, masks = [], [], []
+        for text in prompt:
+            with torch.no_grad():
+                hidden_states, attention_mask = text_encoder.encode(text)
+                out = embeddings_processor.process_hidden_states(
+                    hidden_states, attention_mask
+                )
+            video_encs.append(out.video_encoding)
+            audio_encs.append(out.audio_encoding)
+            masks.append(out.attention_mask)
+
+        prompt_embeds = torch.cat(video_encs, dim=0).to(device=device)
+        prompt_attention_mask = torch.cat(masks, dim=0).to(device=device)
+        audio_prompt_embeds = (
+            torch.cat(audio_encs, dim=0).to(device=device)
+            if audio_encs[0] is not None else None
         )
 
         return {
-            "prompt_ids": tokenized.input_ids.to(device),
-            "prompt_embeds": video_features.to(device=device),
-            "prompt_attention_mask": attention_mask.to(device),
-            "audio_prompt_embeds": audio_features.to(device=device),
+            "prompt_embeds": prompt_embeds,
+            "prompt_attention_mask": prompt_attention_mask,
+            "audio_prompt_embeds": audio_prompt_embeds,
         }
 
     def encode_image(
@@ -192,14 +207,14 @@ class LTXUnionAdapter(BaseAdapter):
         vae_encoder = self.get_component_unwrapped("vae_encoder")
         device = self.device
 
-        # Handle pre-batched tensor input (B, C, T, H, W)
+        # Ensure encoder is on the right device
+        vae_encoder.to(device)
+
         # Detect encoder dtype from parameters (nn.Module has no .dtype attr)
-        enc_dtype = getattr(vae_encoder, "dtype", None)
-        if enc_dtype is None:
-            try:
-                enc_dtype = next(vae_encoder.parameters()).dtype
-            except StopIteration:
-                enc_dtype = None
+        try:
+            enc_dtype = next(vae_encoder.parameters()).dtype
+        except StopIteration:
+            enc_dtype = None
 
         if isinstance(videos, torch.Tensor):
             video_tensor = videos.to(device=device)
