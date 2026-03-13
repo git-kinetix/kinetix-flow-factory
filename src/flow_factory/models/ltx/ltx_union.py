@@ -543,10 +543,10 @@ class LTXUnionAdapter(BaseAdapter):
             B_r, C_r, F_r, H_r, W_r = reference_latents.shape
             H_ds = H_r // self.reference_downscale_factor
             W_ds = W_r // self.reference_downscale_factor
-            # Spatial-only resize: reshape to [B*C, F, H, W] for interpolate
-            ref_flat = reference_latents.reshape(B_r * C_r, F_r, H_r, W_r)
+            # Spatial-only resize: reshape to [B*C*F, 1, H, W] for 2D interpolate
+            ref_flat = reference_latents.reshape(B_r * C_r * F_r, 1, H_r, W_r)
             ref_flat = torch.nn.functional.interpolate(
-                ref_flat.float(), size=(F_r, H_ds, W_ds), mode="trilinear",
+                ref_flat.float(), size=(H_ds, W_ds), mode="bilinear",
                 align_corners=False,
             ).to(reference_latents.dtype)
             reference_latents = ref_flat.reshape(B_r, C_r, F_r, H_ds, W_ds)
