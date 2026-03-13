@@ -96,7 +96,7 @@ class LTXUnionPseudoPipeline:
         vae_decoder = load_video_vae_decoder(model_path)
         text_encoder = load_text_encoder(gemma_path)
         embeddings_processor = load_embeddings_processor(model_path)
-        patchifier = VideoLatentPatchifier()
+        patchifier = VideoLatentPatchifier(patch_size=1)
 
         config = {
             "model_type": "ltx-union",

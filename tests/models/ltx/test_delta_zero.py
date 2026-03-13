@@ -49,7 +49,7 @@ class TestDeltaZeroPatchify:
     def test_roundtrip_identity(self):
         from ltx_core.components.patchifiers import VideoLatentPatchifier
 
-        patchifier = VideoLatentPatchifier()
+        patchifier = VideoLatentPatchifier(patch_size=1)
         x = torch.randn(2, 128, 5, 8, 13, dtype=torch.bfloat16)
         patched = patchifier.patchify(x)
         from ltx_core.types import VideoLatentShape
@@ -63,7 +63,7 @@ class TestDeltaZeroPatchify:
         from ltx_core.components.patchifiers import VideoLatentPatchifier
         from ltx_core.types import VideoLatentShape
 
-        patchifier = VideoLatentPatchifier()
+        patchifier = VideoLatentPatchifier(patch_size=1)
         for F, H, W in [(5, 8, 13), (1, 4, 7), (9, 16, 26)]:
             x = torch.randn(1, 128, F, H, W, dtype=torch.bfloat16)
             patched = patchifier.patchify(x)
