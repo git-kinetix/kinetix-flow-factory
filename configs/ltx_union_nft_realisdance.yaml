@@ -1,0 +1,70 @@
+# configs/ltx_union_nft_realisdance.yaml
+# LTX Union DiffusionNFT fine-tuning on RealisDance-Val
+# Target: RD-H200-2
+
+launcher: "accelerate"
+num_processes: 8
+mixed_precision: "bf16"
+
+project: "LTX-Union-NFT-RealisDance"
+logging_backend: "clearml"
+
+model:
+  model_type: "ltx-union"
+  model_name_or_path: "/path/to/ltx-2.3-22b-checkpoint.safetensors"
+  union_lora_path: "/path/to/IC-LoRA-Union-Control.safetensors"
+  gemma_path: "/path/to/gemma-model"
+  finetune_type: "lora"
+  target_components: ["transformer"]
+  lora_rank: 64
+  lora_alpha: 64
+
+data:
+  dataset: "/home/ubuntu/RealisDance-Val"
+  enable_preprocess: true
+  preprocessing_batch_size: 4
+
+scheduler:
+  dynamics_type: "ODE"
+  noise_level: 0.0
+
+train:
+  trainer_type: "nft"
+  advantage_aggregation: "sum"
+  nft_beta: 0.1
+  off_policy: true
+  ema_decay: 0.5
+  ema_decay_schedule: "piecewise_linear"
+  ema_update_interval: 1
+  num_train_timesteps: 4
+  time_sampling_strategy: "discrete"
+  time_shift: 3.0
+  timestep_range: 0.9
+  per_device_batch_size: 1
+  group_size: 4
+  unique_sample_num_per_epoch: 16
+  learning_rate: 5.0e-5
+  adam_weight_decay: 1.0e-4
+  enable_gradient_checkpointing: true
+  kl_type: "v-based"
+  kl_beta: 0.01
+  num_inference_steps: 50
+  height: 256
+  width: 416
+  num_frames: 33
+
+eval:
+  height: 512
+  width: 832
+  num_frames: 33
+  eval_interval: 5
+
+rewards:
+  - name: "mpjpe"
+    reward_model: "flow_factory.rewards.mpjpe_reward.MPJPERewardModel"
+    weight: 1.0
+    batch_size: 4
+    device: "cuda"
+    dtype: "bfloat16"
+    gvhmr_root: "/data/GVHMR"
+    gt_joints_path: "/home/ubuntu/RealisDance-Val/gt_joints.pt"
