@@ -118,7 +118,8 @@ class LTXUnionAdapter(BaseAdapter):
     @property
     def default_target_modules(self) -> List[str]:
         return [
-            "attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out",
+            "attn1.to_q", "attn1.to_k", "attn1.to_v", "attn1.to_out",
+            "attn2.to_q", "attn2.to_k", "attn2.to_v", "attn2.to_out",
             "ff.net.0.proj", "ff.net.2",
         ]
 
