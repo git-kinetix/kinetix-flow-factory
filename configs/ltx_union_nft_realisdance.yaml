@@ -21,6 +21,8 @@ model:
 
 data:
   dataset: "/home/ubuntu/RealisDance-Val"
+  # video_dir must be dataset root because JSONL paths are relative to root
+  video_dir: "/home/ubuntu/RealisDance-Val"
   enable_preprocess: true
   preprocessing_batch_size: 4
 

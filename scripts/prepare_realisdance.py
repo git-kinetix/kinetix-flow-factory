@@ -39,15 +39,20 @@ def scan_dataset(dataset_root: str) -> list[dict]:
 
     for video_path in sorted(video_dir.glob("*.mp4")):
         video_id = video_path.stem
+        cond_path = condition_dir / f"{video_id}.mp4"
+        if not cond_path.exists():
+            print(f"Warning: no condition video for {video_id}, skipping")
+            continue
+
         sample = {
             "video_id": video_id,
-            "video": str(video_path.relative_to(root)),
+            # "video" field is the condition video — loaded by dataset and
+            # passed to encode_video() → reference_latents for IC-LoRA
+            "video": str(cond_path.relative_to(root)),
             "prompt": prompts.get(video_id, f"A person performing an action"),
+            # GT video path stored for reference (not loaded by dataset)
+            "gt_video": str(video_path.relative_to(root)),
         }
-
-        cond_path = condition_dir / f"{video_id}.mp4"
-        if cond_path.exists():
-            sample["reference_video"] = str(cond_path.relative_to(root))
 
         for ext in [".png", ".jpg", ".jpeg"]:
             ref_path = ref_image_dir / f"{video_id}{ext}"

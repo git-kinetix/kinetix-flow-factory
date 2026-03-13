@@ -67,7 +67,7 @@ class Arguments(ArgABC):
         default='Flow-Factory',
         metadata={"help": "Project name for logging platforms."},
     )
-    logging_backend: Optional[Literal['wandb', 'swanlab', 'none']] = field(
+    logging_backend: Optional[Literal['wandb', 'swanlab', 'clearml', 'none']] = field(
         default=None,
         metadata={"help": "Logging backend to use."},
     )

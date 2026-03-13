@@ -200,6 +200,13 @@ class LTXUnionAdapter(BaseAdapter):
             latents = vae_encoder(video_tensor)
             return {"reference_latents": latents}
 
+        # Unwrap nested dataset format: List[List[List[PIL]]] → List[List[PIL]]
+        # Dataset provides [[frames_sample1], [frames_sample2], ...] (one video per sample)
+        if (isinstance(videos, list) and len(videos) > 0
+                and isinstance(videos[0], list) and len(videos[0]) > 0
+                and isinstance(videos[0][0], list)):
+            videos = [v[0] for v in videos]
+
         if isinstance(videos[0], Image.Image):
             videos = [videos]
 
@@ -265,11 +272,13 @@ class LTXUnionAdapter(BaseAdapter):
             frame_chunks = list(vae_decode_video(
                 latents[i], vae_decoder, tiling_config=None, generator=None
             ))
-            decoded = torch.cat(frame_chunks, dim=0)  # [total_F, H, W, C]
+            decoded = torch.cat(frame_chunks, dim=0)  # [total_F, H, W, C] uint8
+            # Convert to [T, C, H, W] float [0,1] — expected by BaseSample/rewards
+            decoded = decoded.permute(0, 3, 1, 2).float() / 255.0
             videos.append(decoded)
 
         if output_type == "pt":
-            return torch.stack(videos, dim=0)  # [B, F, H, W, C]
+            return torch.stack(videos, dim=0)  # [B, T, C, H, W]
         else:
             return videos
 

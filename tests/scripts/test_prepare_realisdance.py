@@ -35,9 +35,9 @@ class TestScanDataset:
         samples = scan_dataset(str(mock_dataset))
         for s in samples:
             assert "video_id" in s
-            assert "video" in s
+            assert "video" in s  # condition video path
             assert "prompt" in s
-            assert "reference_video" in s
+            assert "gt_video" in s
             assert "image" in s
 
     def test_prompts_loaded_from_json(self, mock_dataset):
@@ -54,5 +54,6 @@ class TestScanDataset:
         from prepare_realisdance import scan_dataset
         (mock_dataset / "condition" / "pose_depth" / "clip_002.mp4").unlink()
         samples = scan_dataset(str(mock_dataset))
-        by_id = {s["video_id"]: s for s in samples}
-        assert "reference_video" not in by_id["clip_002"]
+        # clip_002 should be skipped (no condition video)
+        assert len(samples) == 1
+        assert samples[0]["video_id"] == "clip_001"

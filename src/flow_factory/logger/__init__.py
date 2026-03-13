@@ -22,6 +22,7 @@ loading system for easy extensibility.
 Supported backends:
 - WandB (Weights & Biases)
 - SwanLab
+- ClearML
 """
 
 from .abc import Logger, LogImage, LogVideo, LogTable

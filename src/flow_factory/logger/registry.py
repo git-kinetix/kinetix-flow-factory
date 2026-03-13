@@ -29,6 +29,7 @@ _LOGGER_REGISTRY = {
     'wandb': 'flow_factory.logger.wandb.WandbLogger',
     'swanlab': 'flow_factory.logger.swanlab.SwanlabLogger',
     'tensorboard': 'flow_factory.logger.tensorboard.TensorboardLogger',
+    'clearml': 'flow_factory.logger.clearml.ClearMLLogger',
     'none': None,
 }
 
