@@ -288,12 +288,14 @@ class LTXUnionAdapter(BaseAdapter):
         from ltx_core.model.video_vae import decode_video as vae_decode_video
 
         vae_decoder = self.get_component_unwrapped("vae_decoder")
+        vae_decoder.to(latents.device)
         videos = []
         for i in range(latents.shape[0]):
             # C4 fix: decode_video takes 4D [C,F,H,W], yields [F,H,W,C] uint8 chunks
-            frame_chunks = list(vae_decode_video(
-                latents[i], vae_decoder, tiling_config=None, generator=None
-            ))
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                frame_chunks = list(vae_decode_video(
+                    latents[i], vae_decoder, tiling_config=None, generator=None
+                ))
             decoded = torch.cat(frame_chunks, dim=0)  # [total_F, H, W, C] uint8
             # Convert to [T, C, H, W] float [0,1] — expected by BaseSample/rewards
             decoded = decoded.permute(0, 3, 1, 2).float() / 255.0
@@ -438,7 +440,8 @@ class LTXUnionAdapter(BaseAdapter):
             context_mask=None,  # ltx_trainer uses None after processing
         )
 
-        # 7. Transformer forward (autocast handles bf16 dtype alignment)
+        # 7. Transformer forward (autocast for bf16 dtype alignment — outside
+        #    accelerator context, components may have mixed float32/bf16 dtypes)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             video_pred, _ = transformer(
                 video=modality, audio=None, perturbations=None
