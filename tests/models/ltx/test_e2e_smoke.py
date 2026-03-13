@@ -285,8 +285,15 @@ class TestForwardPass:
 
     def test_forward_returns_sde_output(self):
         """Single denoising step returns SDESchedulerOutput."""
+        # Move components to GPU
+        for name in self.adapter.inference_modules:
+            comp = self.adapter.get_component_unwrapped(name)
+            if hasattr(comp, "to"):
+                comp.to("cuda")
+
         encoded = self.adapter.encode_prompt(prompt=["A person dancing"])
-        ref_3d = torch.randn(1, 64, 128, device="cuda", dtype=torch.bfloat16)  # already patchified
+        # 5D reference at half resolution (downscale_factor=2): H=4, W=6
+        ref_5d = torch.randn(1, 128, 2, 4, 6, device="cuda", dtype=torch.bfloat16)
         latents = torch.randn(1, 128, 2, 8, 13, device="cuda", dtype=torch.bfloat16)
 
         # Set timesteps on scheduler first
@@ -298,8 +305,7 @@ class TestForwardPass:
             t=t,
             t_next=t_next,
             latents=latents,
-            reference_latents=ref_3d,
-            ref_seq_len=64,
+            reference_latents=ref_5d,
             prompt_embeds=encoded["prompt_embeds"],
             prompt_attention_mask=encoded["prompt_attention_mask"],
             noise_level=0.0,
