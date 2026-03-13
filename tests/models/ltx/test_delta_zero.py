@@ -96,7 +96,8 @@ class TestDeltaZeroTransformerStep:
         sigma = torch.tensor([0.5], device="cuda")
         timesteps = torch.full((B, S), 0.5, device="cuda")
         positions = torch.randn(B, 3, S, 2, device="cuda", dtype=torch.bfloat16)
-        context = torch.randn(B, 32, 4096, device="cuda", dtype=torch.bfloat16)
+        # Gemma-3 hidden_size=3840 — transformer's text_projection: Linear(3840→4096)
+        context = torch.randn(B, 32, 3840, device="cuda", dtype=torch.bfloat16)
 
         modality = Modality(
             enabled=True,
