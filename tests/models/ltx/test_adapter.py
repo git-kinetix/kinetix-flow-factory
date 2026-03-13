@@ -128,3 +128,13 @@ class TestForwardBehavior:
         assert "latents" in params
         instructions = list(dis.get_instructions(LTXUnionAdapter.decode_latents))
         assert len(instructions) > 10, "decode_latents() appears to still be a stub"
+
+
+class TestInferenceSignature:
+    def test_inference_accepts_required_args(self):
+        from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
+        import inspect
+        sig = inspect.signature(LTXUnionAdapter.inference)
+        params = list(sig.parameters.keys())
+        assert "prompt" in params or "prompt_embeds" in params
+        assert "self" in params

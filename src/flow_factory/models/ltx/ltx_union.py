@@ -414,5 +414,152 @@ class LTXUnionAdapter(BaseAdapter):
 
         return output
 
-    def inference(self, *args, **kwargs):
-        raise NotImplementedError("Implemented in Task 7")
+    # ======================== Inference (full denoising loop) ========================
+
+    @torch.no_grad()
+    def inference(
+        self,
+        # Raw inputs
+        prompt: Optional[Union[str, List[str]]] = None,
+        # Pre-encoded inputs
+        prompt_ids: Optional[torch.Tensor] = None,
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_attention_mask: Optional[torch.Tensor] = None,
+        # Reference conditioning
+        reference_latents: Optional[torch.Tensor] = None,
+        # Generation parameters
+        height: int = 256,
+        width: int = 416,
+        num_frames: int = 33,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 1.0,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        # RL-specific
+        compute_log_prob: bool = True,
+        trajectory_indices: Any = "all",
+        extra_call_back_kwargs: List[str] = [],
+        # Passthrough
+        video_id: Optional[Union[str, List[str]]] = None,
+        **kwargs,
+    ) -> List["LTXUnionSample"]:
+        """Full denoising inference loop with IC-LoRA conditioning."""
+        from diffusers.utils.torch_utils import randn_tensor
+        from ...utils.trajectory_collector import (
+            create_trajectory_collector,
+            create_callback_collector,
+            TrajectoryIndicesType,
+        )
+
+        device = self.device
+
+        # 1. Encode prompt if needed
+        if prompt_embeds is None:
+            assert prompt is not None, "Either prompt or prompt_embeds required"
+            encoded = self.encode_prompt(prompt=prompt)
+            prompt_embeds = encoded["prompt_embeds"]
+            prompt_ids = encoded["prompt_ids"]
+            prompt_attention_mask = encoded["prompt_attention_mask"]
+            kwargs["_audio_prompt_embeds"] = encoded.get("_audio_prompt_embeds")
+
+        batch_size = prompt_embeds.shape[0]
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        if prompt is None:
+            prompt = [""] * batch_size
+        if video_id is None:
+            video_id = [None] * batch_size
+        elif isinstance(video_id, str):
+            video_id = [video_id]
+
+        # 2. Prepare noise latents [B, 128, F, H, W]
+        F_lat = (num_frames - 1) // 8 + 1
+        H_lat = height // 32
+        W_lat = width // 32
+        latent_shape = (batch_size, 128, F_lat, H_lat, W_lat)
+        latents = randn_tensor(latent_shape, generator=generator, device=device, dtype=torch.bfloat16)
+
+        # 3. Patchify reference latents
+        patchifier = self.get_component_unwrapped("patchifier")
+        assert reference_latents is not None, "reference_latents required for IC-LoRA"
+        ref_latents_3d = patchifier.patchify(reference_latents)
+        seq_ref = ref_latents_3d.shape[1]
+
+        # 4. Set sigma schedule
+        self.pipeline.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.pipeline.scheduler.timesteps
+
+        # 5. Trajectory collectors
+        latent_collector = create_trajectory_collector(trajectory_indices, num_inference_steps)
+        latent_collector.collect(latents, step_idx=0)
+
+        log_prob_collector = None
+        if compute_log_prob:
+            log_prob_collector = create_trajectory_collector(trajectory_indices, num_inference_steps)
+
+        callback_collector = create_callback_collector(trajectory_indices, num_inference_steps)
+
+        # 6. Denoising loop
+        for i in range(len(timesteps) - 1):
+            t = timesteps[i]
+            t_next = timesteps[i + 1]
+            noise_level_val = self.pipeline.scheduler.get_noise_level_for_timestep(t)
+            current_compute_log_prob = compute_log_prob and noise_level_val > 0
+
+            output = self.forward(
+                t=t,
+                t_next=t_next,
+                latents=latents,
+                reference_latents=ref_latents_3d,
+                ref_seq_len=seq_ref,
+                prompt_embeds=prompt_embeds,
+                prompt_attention_mask=prompt_attention_mask,
+                noise_level=noise_level_val,
+                compute_log_prob=current_compute_log_prob,
+                return_kwargs=["next_latents", "log_prob", "noise_pred"],
+                **kwargs,
+            )
+
+            latents = output.next_latents
+            latent_collector.collect(latents, i + 1)
+            if current_compute_log_prob and log_prob_collector is not None:
+                log_prob_collector.collect(output.log_prob, i)
+            callback_collector.collect_step(
+                i, output, extra_call_back_kwargs,
+                capturable={"noise_level": noise_level_val},
+            )
+
+        # 7. Decode to pixel video
+        videos = self.decode_latents(latents, output_type="pt")
+
+        # 8. Package into samples
+        all_latents = latent_collector.get_result()
+        latent_index_map = latent_collector.get_index_map()
+        all_log_probs = log_prob_collector.get_result() if log_prob_collector else None
+        log_prob_index_map = log_prob_collector.get_index_map() if log_prob_collector else None
+        extra_cb_res = callback_collector.get_result()
+        callback_index_map = callback_collector.get_index_map()
+
+        samples = []
+        for b in range(batch_size):
+            sample = LTXUnionSample(
+                timesteps=timesteps,
+                all_latents=torch.stack([lat[b] for lat in all_latents], dim=0) if all_latents else None,
+                log_probs=torch.stack([lp[b] for lp in all_log_probs], dim=0) if all_log_probs else None,
+                latent_index_map=latent_index_map,
+                log_prob_index_map=log_prob_index_map,
+                video=videos[b] if videos is not None else None,
+                height=height,
+                width=width,
+                prompt=prompt[b] if prompt else "",
+                prompt_ids=prompt_ids[b] if prompt_ids is not None else None,
+                prompt_embeds=prompt_embeds[b],
+                ref_seq_len=seq_ref,
+                video_id=video_id[b],
+                reference_latents=ref_latents_3d[b],
+                extra_kwargs={
+                    **{k: v[b] for k, v in extra_cb_res.items()},
+                    "callback_index_map": callback_index_map,
+                },
+            )
+            samples.append(sample)
+
+        return samples
