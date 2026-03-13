@@ -14,8 +14,6 @@ Requirements:
 
 Run: pytest tests/models/ltx/test_delta_zero.py -v
 """
-import gc
-
 import pytest
 import torch
 import os
@@ -136,9 +134,6 @@ class TestDeltaZeroFullLoop:
         from accelerate import Accelerator
         from flow_factory.hparams import Arguments
 
-        gc.collect()
-        torch.cuda.empty_cache()
-
         # Build a minimal config with real model paths
         config_dict = {
             "launcher": "accelerate",
@@ -177,6 +172,8 @@ class TestDeltaZeroFullLoop:
         from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
         self.adapter = LTXUnionAdapter(config, accelerator)
         self.config = config
+        yield
+        del self.adapter
 
     def test_full_loop_deterministic(self):
         """Same seed → bitwise identical latents."""

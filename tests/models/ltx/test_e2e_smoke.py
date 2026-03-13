@@ -12,7 +12,6 @@ Requirements:
 
 Run: pytest tests/models/ltx/test_e2e_smoke.py -v
 """
-import gc
 import json
 import os
 import tempfile
@@ -209,17 +208,12 @@ class TestInference:
         from flow_factory.hparams import Arguments
         from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
 
-        gc.collect()
-        torch.cuda.empty_cache()
-
         self.tmpdir = tempfile.mkdtemp()
         config = Arguments.from_dict(_make_config(self.tmpdir))
         accelerator = Accelerator(mixed_precision="bf16")
         self.adapter = LTXUnionAdapter(config, accelerator)
         yield
         del self.adapter
-        gc.collect()
-        torch.cuda.empty_cache()
 
     def test_inference_produces_samples(self):
         """Inference returns list of LTXUnionSample with valid fields."""
@@ -286,17 +280,12 @@ class TestForwardPass:
         from flow_factory.hparams import Arguments
         from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
 
-        gc.collect()
-        torch.cuda.empty_cache()
-
         self.tmpdir = tempfile.mkdtemp()
         config = Arguments.from_dict(_make_config(self.tmpdir))
         accelerator = Accelerator(mixed_precision="bf16")
         self.adapter = LTXUnionAdapter(config, accelerator)
         yield
         del self.adapter
-        gc.collect()
-        torch.cuda.empty_cache()
 
     def test_forward_returns_sde_output(self):
         """Single denoising step returns SDESchedulerOutput."""
