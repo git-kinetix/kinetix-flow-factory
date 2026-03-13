@@ -51,29 +51,39 @@ class TestEncodingMethods:
 
     def test_encode_prompt_no_longer_raises(self):
         """encode_prompt must be implemented (not raise NotImplementedError).
-        We mock the text_encoder to verify the method runs end-to-end."""
-        from unittest.mock import MagicMock, patch
+        We mock the text_encoder + embeddings_processor to verify the method runs end-to-end."""
+        from unittest.mock import MagicMock
         from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
 
         adapter = MagicMock(spec=LTXUnionAdapter)
         adapter.device = torch.device("cpu")
 
-        # Mock the text_encoder.precompute call
-        fake_embeds = torch.randn(1, 16, 64)
-        fake_audio = torch.randn(1, 16, 64)
+        # Mock text_encoder.encode() → (hidden_states, attention_mask)
+        fake_hs = torch.randn(1, 16, 3840)
         fake_mask = torch.ones(1, 16)
-        mock_encoder = MagicMock()
-        mock_encoder.precompute.return_value = (fake_embeds, fake_audio, fake_mask)
-        mock_encoder.tokenizer.return_value = MagicMock(
-            input_ids=torch.zeros(1, 16, dtype=torch.long)
-        )
-        adapter.get_component_unwrapped.return_value = mock_encoder
+        mock_text_encoder = MagicMock()
+        mock_text_encoder.encode.return_value = (fake_hs, fake_mask)
+
+        # Mock embeddings_processor.process_hidden_states() → output with video/audio/mask
+        mock_proc_output = MagicMock()
+        mock_proc_output.video_encoding = torch.randn(1, 16, 3840)
+        mock_proc_output.audio_encoding = torch.randn(1, 16, 3840)
+        mock_proc_output.attention_mask = torch.ones(1, 16)
+        mock_embeddings_proc = MagicMock()
+        mock_embeddings_proc.process_hidden_states.return_value = mock_proc_output
+
+        def _get_component(name):
+            if name == "text_encoder":
+                return mock_text_encoder
+            return mock_embeddings_proc
+
+        adapter.get_component_unwrapped.side_effect = _get_component
 
         # Call the real method on the mock
         result = LTXUnionAdapter.encode_prompt(adapter, prompt=["test prompt"])
         assert "prompt_embeds" in result
-        assert "prompt_ids" in result
         assert "prompt_attention_mask" in result
+        assert "audio_prompt_embeds" in result
 
     def test_encode_video_returns_reference_latents(self):
         """encode_video must return dict with 'reference_latents' key."""
