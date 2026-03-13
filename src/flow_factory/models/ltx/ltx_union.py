@@ -261,13 +261,15 @@ class LTXUnionAdapter(BaseAdapter):
         vae_decoder = self.get_component_unwrapped("vae_decoder")
         videos = []
         for i in range(latents.shape[0]):
-            decoded = vae_decode_video(
-                latents[i : i + 1], vae_decoder, tiling_config=None, generator=None
-            )
+            # C4 fix: decode_video takes 4D [C,F,H,W], yields [F,H,W,C] uint8 chunks
+            frame_chunks = list(vae_decode_video(
+                latents[i], vae_decoder, tiling_config=None, generator=None
+            ))
+            decoded = torch.cat(frame_chunks, dim=0)  # [total_F, H, W, C]
             videos.append(decoded)
 
         if output_type == "pt":
-            return torch.cat(videos, dim=0)
+            return torch.stack(videos, dim=0)  # [B, F, H, W, C]
         else:
             return videos
 
@@ -310,6 +312,9 @@ class LTXUnionAdapter(BaseAdapter):
         6. Scheduler step → SDESchedulerOutput
         """
         from ltx_core.model.transformer.modality import Modality
+        from ltx_core.types import VideoLatentShape, VIDEO_SCALE_FACTORS
+        from ltx_core.components.patchifiers import get_pixel_coords
+        from ltx_core.text_encoders.gemma import convert_to_additive_mask
 
         batch_size = latents.shape[0]
         device = latents.device
@@ -343,19 +348,25 @@ class LTXUnionAdapter(BaseAdapter):
         target_ts = sigma_batch.unsqueeze(1).expand(batch_size, seq_target)
         per_token_timesteps = torch.cat([ref_ts, target_ts], dim=1)
 
-        # 4. Build positions
+        # 4. Build positions using VideoLatentShape (C2 fix)
         _, _, F_lat, H_lat, W_lat = latents.shape
         ref_H = H_lat // self.reference_downscale_factor
         ref_W = W_lat // self.reference_downscale_factor
 
+        target_shape = VideoLatentShape(
+            batch=batch_size, channels=128, frames=F_lat,
+            height=H_lat, width=W_lat,
+        )
         target_positions = patchifier.get_patch_grid_bounds(
-            num_frames=F_lat, height=H_lat, width=W_lat,
-            batch_size=batch_size, device=device, dtype=dtype,
+            target_shape, device=device,
         )
 
+        ref_shape = VideoLatentShape(
+            batch=batch_size, channels=128, frames=F_lat,
+            height=ref_H, width=ref_W,
+        )
         ref_positions = patchifier.get_patch_grid_bounds(
-            num_frames=F_lat, height=ref_H, width=ref_W,
-            batch_size=batch_size, device=device, dtype=dtype,
+            ref_shape, device=device,
         )
 
         if self.reference_downscale_factor != 1:
@@ -365,11 +376,17 @@ class LTXUnionAdapter(BaseAdapter):
 
         positions = torch.cat([ref_positions, target_positions], dim=2)
 
+        # Convert latent-space positions to pixel-space (C5 fix)
+        positions = get_pixel_coords(positions, VIDEO_SCALE_FACTORS, causal_fix=True)
+        # Temporal axis must be in seconds, not frame indices
+        fps = getattr(self.pipeline, "fps", 24.0)
+        positions = positions.to(dtype=torch.float32)
+        positions[:, 0, ...] = positions[:, 0, ...] / fps
+
         # 5. Apply embeddings processor connectors (block 3)
+        # C6 fix: convert binary mask → additive mask for transformer attention
         embeddings_processor = self.get_component_unwrapped("embeddings_processor")
-        additive_mask = None
-        if prompt_attention_mask is not None:
-            additive_mask = prompt_attention_mask
+        additive_mask = convert_to_additive_mask(prompt_attention_mask, dtype=dtype)
         video_context, _, _ = embeddings_processor.create_embeddings(
             prompt_embeds,
             kwargs.get("_audio_prompt_embeds", prompt_embeds),
@@ -392,12 +409,9 @@ class LTXUnionAdapter(BaseAdapter):
             video=modality, audio=None, perturbations=None
         )
 
-        # 8. Extract target prediction and unpatchify
+        # 8. Extract target prediction and unpatchify (C3 fix: use VideoLatentShape)
         target_v_pred_3d = video_pred[:, seq_ref:]
-        v_pred_5d = patchifier.unpatchify(
-            target_v_pred_3d,
-            num_frames=F_lat, height=H_lat, width=W_lat,
-        )
+        v_pred_5d = patchifier.unpatchify(target_v_pred_3d, target_shape)
 
         # 9. Scheduler step (operates in 5D)
         output = self.pipeline.scheduler.step(
@@ -497,10 +511,14 @@ class LTXUnionAdapter(BaseAdapter):
 
         callback_collector = create_callback_collector(trajectory_indices, num_inference_steps)
 
-        # 6. Denoising loop
-        for i in range(len(timesteps) - 1):
+        # 6. Denoising loop (C1 fix: include final step to terminal sigma=0)
+        for i in range(len(timesteps)):
             t = timesteps[i]
-            t_next = timesteps[i + 1]
+            t_next = (
+                timesteps[i + 1]
+                if i + 1 < len(timesteps)
+                else torch.tensor(0.0, device=device, dtype=timesteps.dtype)
+            )
             noise_level_val = self.pipeline.scheduler.get_noise_level_for_timestep(t)
             current_compute_log_prob = compute_log_prob and noise_level_val > 0
 

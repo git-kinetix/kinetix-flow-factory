@@ -417,7 +417,7 @@ class LTXSDEScheduler(SDESchedulerMixin):
                         -((next_latents.detach() - next_latents_mean) ** 2)
                         / (2 * (std_dev_t**2))
                     )
-                    - math.log(std_dev_t.mean().item() + 1e-8)
+                    - torch.log(std_dev_t)
                     - torch.log(torch.sqrt(2 * torch.as_tensor(math.pi)))
                 )
                 log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
