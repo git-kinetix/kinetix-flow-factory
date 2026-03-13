@@ -8,17 +8,18 @@ import pytest
 class TestScanDataset:
     @pytest.fixture
     def mock_dataset(self, tmp_path):
-        (tmp_path / "videos").mkdir()
-        (tmp_path / "condition" / "pose_depth").mkdir(parents=True)
-        (tmp_path / "ref_images").mkdir()
+        (tmp_path / "gt").mkdir()
+        (tmp_path / "vace_conditioning").mkdir()
+        (tmp_path / "ref").mkdir()
 
         for vid_id in ["clip_001", "clip_002"]:
-            (tmp_path / "videos" / f"{vid_id}.mp4").write_bytes(b"\x00")
-            (tmp_path / "condition" / "pose_depth" / f"{vid_id}.mp4").write_bytes(b"\x00")
-            (tmp_path / "ref_images" / f"{vid_id}.png").write_bytes(b"\x00")
+            (tmp_path / "gt" / f"{vid_id}.mp4").write_bytes(b"\x00")
+            (tmp_path / "vace_conditioning" / f"{vid_id}.mp4").write_bytes(b"\x00")
+            (tmp_path / "ref" / f"{vid_id}.png").write_bytes(b"\x00")
 
-        prompts = {"clip_001": "A person dancing", "clip_002": "A person walking"}
-        (tmp_path / "prompts.json").write_text(json.dumps(prompts))
+        # Write prompts as CSV (id,prompt)
+        csv_content = 'id,prompt\nclip_001,"A person dancing"\nclip_002,"A person walking"\n'
+        (tmp_path / "prompts.csv").write_text(csv_content)
         return tmp_path
 
     def test_finds_all_videos(self, mock_dataset):
@@ -40,7 +41,7 @@ class TestScanDataset:
             assert "gt_video" in s
             assert "image" in s
 
-    def test_prompts_loaded_from_json(self, mock_dataset):
+    def test_prompts_loaded_from_csv(self, mock_dataset):
         import sys
         sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
         from prepare_realisdance import scan_dataset
@@ -52,7 +53,7 @@ class TestScanDataset:
         import sys
         sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
         from prepare_realisdance import scan_dataset
-        (mock_dataset / "condition" / "pose_depth" / "clip_002.mp4").unlink()
+        (mock_dataset / "vace_conditioning" / "clip_002.mp4").unlink()
         samples = scan_dataset(str(mock_dataset))
         # clip_002 should be skipped (no condition video)
         assert len(samples) == 1
