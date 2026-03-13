@@ -220,6 +220,7 @@ class TestInference:
 
         gen = torch.Generator(device="cuda").manual_seed(42)
         samples = self.adapter.inference(
+            prompt=["A person dancing"],
             prompt_embeds=encoded["prompt_embeds"],
             prompt_attention_mask=encoded["prompt_attention_mask"],
             reference_latents=ref,
