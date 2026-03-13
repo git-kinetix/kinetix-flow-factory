@@ -374,7 +374,9 @@ class LTXUnionAdapter(BaseAdapter):
             H_ref = kwargs.get("ref_H", latents.shape[3] // self.reference_downscale_factor)
             W_ref = kwargs.get("ref_W", latents.shape[4] // self.reference_downscale_factor)
         seq_ref = ref_latents_3d.shape[1]
-        combined = torch.cat([ref_latents_3d, target_latents_3d], dim=1)
+        combined = torch.cat([
+            ref_latents_3d.to(dtype=dtype), target_latents_3d,
+        ], dim=1)
 
         # 3. Build per-token timesteps
         sigma = t / 1000.0
