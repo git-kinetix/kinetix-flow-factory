@@ -242,13 +242,177 @@ class LTXUnionAdapter(BaseAdapter):
 
         return results
 
-    def decode_latents(self, latents, **kwargs):
-        raise NotImplementedError("Implemented in Task 6")
+    # ======================== Decoding ========================
 
-    # ======================== Sampling & Training (stubs) ========================
+    def decode_latents(
+        self,
+        latents: torch.Tensor,
+        output_type: Literal["pt", "pil", "np"] = "pil",
+        **kwargs,
+    ) -> Union[torch.Tensor, List[Image.Image]]:
+        """Decode latent video to pixel space.
 
-    def forward(self, *args, **kwargs):
-        raise NotImplementedError("Implemented in Task 6")
+        Args:
+            latents: [B, 128, F, H, W] unpatchified latents.
+            output_type: Output format.
+        """
+        from ltx_core.model.video_vae import decode_video as vae_decode_video
+
+        vae_decoder = self.get_component_unwrapped("vae_decoder")
+        videos = []
+        for i in range(latents.shape[0]):
+            decoded = vae_decode_video(
+                latents[i : i + 1], vae_decoder, tiling_config=None, generator=None
+            )
+            videos.append(decoded)
+
+        if output_type == "pt":
+            return torch.cat(videos, dim=0)
+        else:
+            return videos
+
+    # ======================== Forward (single denoising step) ========================
+
+    def forward(
+        self,
+        # Timestep info
+        t: torch.Tensor,
+        t_next: Optional[torch.Tensor] = None,
+        # Latent state (5D unpatchified from NFT trainer)
+        latents: Optional[torch.Tensor] = None,
+        next_latents: Optional[torch.Tensor] = None,
+        # Reference latents (3D patchified)
+        reference_latents: Optional[torch.Tensor] = None,
+        ref_seq_len: Optional[int] = None,
+        # Conditioning
+        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_attention_mask: Optional[torch.Tensor] = None,
+        # Control flags
+        noise_level: Optional[float] = None,
+        compute_log_prob: bool = True,
+        return_kwargs: List[str] = [
+            "noise_pred", "next_latents", "log_prob",
+            "next_latents_mean", "std_dev_t", "dt",
+        ],
+        **kwargs,
+    ) -> SDESchedulerOutput:
+        """Single denoising step with IC-LoRA reference concatenation.
+
+        The LTX transformer outputs velocity v. The NFT trainer treats
+        this as noise_pred — the naming is cosmetic.
+
+        Flow:
+        1. Patchify 5D target latents → 3D tokens
+        2. Concatenate [ref_latents | target_latents]
+        3. Build per-token timesteps + positions + Modality
+        4. Transformer forward
+        5. Extract target prediction, unpatchify
+        6. Scheduler step → SDESchedulerOutput
+        """
+        from ltx_core.model.transformer.modality import Modality
+
+        batch_size = latents.shape[0]
+        device = latents.device
+        dtype = latents.dtype
+
+        patchifier = self.get_component_unwrapped("patchifier")
+        transformer = self.get_component("transformer")  # accelerator-wrapped
+
+        # 1. Patchify target latents: [B, 128, F, H, W] → [B, seq_target, 128]
+        target_latents_3d = patchifier.patchify(latents)
+        seq_target = target_latents_3d.shape[1]
+
+        next_latents_3d = None
+        if next_latents is not None:
+            next_latents_3d = patchifier.patchify(next_latents)
+
+        # 2. Concatenate reference + target
+        assert reference_latents is not None, "reference_latents required for IC-LoRA"
+        seq_ref = reference_latents.shape[1]
+        combined = torch.cat([reference_latents, target_latents_3d], dim=1)
+
+        # 3. Build per-token timesteps
+        sigma = t / 1000.0
+        if isinstance(sigma, (int, float)):
+            sigma = torch.tensor(sigma, device=device, dtype=torch.float32)
+        sigma_batch = sigma.view(-1)
+        if sigma_batch.shape[0] == 1:
+            sigma_batch = sigma_batch.expand(batch_size)
+
+        ref_ts = torch.zeros(batch_size, seq_ref, device=device, dtype=torch.float32)
+        target_ts = sigma_batch.unsqueeze(1).expand(batch_size, seq_target)
+        per_token_timesteps = torch.cat([ref_ts, target_ts], dim=1)
+
+        # 4. Build positions
+        _, _, F_lat, H_lat, W_lat = latents.shape
+        ref_H = H_lat // self.reference_downscale_factor
+        ref_W = W_lat // self.reference_downscale_factor
+
+        target_positions = patchifier.get_patch_grid_bounds(
+            num_frames=F_lat, height=H_lat, width=W_lat,
+            batch_size=batch_size, device=device, dtype=dtype,
+        )
+
+        ref_positions = patchifier.get_patch_grid_bounds(
+            num_frames=F_lat, height=ref_H, width=ref_W,
+            batch_size=batch_size, device=device, dtype=dtype,
+        )
+
+        if self.reference_downscale_factor != 1:
+            ref_positions = ref_positions.clone()
+            ref_positions[:, 1, ...] *= self.reference_downscale_factor
+            ref_positions[:, 2, ...] *= self.reference_downscale_factor
+
+        positions = torch.cat([ref_positions, target_positions], dim=2)
+
+        # 5. Apply embeddings processor connectors (block 3)
+        embeddings_processor = self.get_component_unwrapped("embeddings_processor")
+        additive_mask = None
+        if prompt_attention_mask is not None:
+            additive_mask = prompt_attention_mask
+        video_context, _, _ = embeddings_processor.create_embeddings(
+            prompt_embeds,
+            kwargs.get("_audio_prompt_embeds", prompt_embeds),
+            additive_mask,
+        )
+
+        # 6. Build Modality
+        modality = Modality(
+            enabled=True,
+            latent=combined,
+            sigma=sigma_batch,
+            timesteps=per_token_timesteps,
+            positions=positions,
+            context=video_context,
+            context_mask=prompt_attention_mask,
+        )
+
+        # 7. Transformer forward
+        video_pred, _ = transformer(
+            video=modality, audio=None, perturbations=None
+        )
+
+        # 8. Extract target prediction and unpatchify
+        target_v_pred_3d = video_pred[:, seq_ref:]
+        v_pred_5d = patchifier.unpatchify(
+            target_v_pred_3d,
+            num_frames=F_lat, height=H_lat, width=W_lat,
+        )
+
+        # 9. Scheduler step (operates in 5D)
+        output = self.pipeline.scheduler.step(
+            noise_pred=v_pred_5d,
+            timestep=t,
+            latents=latents,
+            next_latents=next_latents,
+            timestep_next=t_next,
+            noise_level=noise_level,
+            compute_log_prob=compute_log_prob,
+            return_dict=True,
+            return_kwargs=return_kwargs,
+        )
+
+        return output
 
     def inference(self, *args, **kwargs):
         raise NotImplementedError("Implemented in Task 7")

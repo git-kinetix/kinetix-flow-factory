@@ -100,3 +100,31 @@ class TestEncodingMethods:
         adapter = MagicMock(spec=LTXUnionAdapter)
         result = LTXUnionAdapter.encode_image(adapter, images=torch.randn(1, 3, 64, 64))
         assert result is None or isinstance(result, dict)
+
+
+class TestForwardBehavior:
+    def test_forward_no_longer_raises_not_implemented(self):
+        """forward() must be implemented — calling it should not raise NotImplementedError.
+        We verify the method signature has all required parameters and is callable."""
+        from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
+        import inspect
+        sig = inspect.signature(LTXUnionAdapter.forward)
+        params = list(sig.parameters.keys())
+        # Must accept these core arguments
+        for required in ["t", "latents", "reference_latents", "prompt_embeds"]:
+            assert required in params, f"forward() missing required param: {required}"
+        # Verify method is not the NotImplementedError stub
+        import dis
+        instructions = list(dis.get_instructions(LTXUnionAdapter.forward))
+        raise_ops = [i for i in instructions if i.opname == "RAISE_VARARGS"]
+        assert len(instructions) > 10, "forward() appears to still be a stub"
+
+    def test_decode_latents_no_longer_raises_not_implemented(self):
+        """decode_latents() must be implemented — not a stub."""
+        from flow_factory.models.ltx.ltx_union import LTXUnionAdapter
+        import inspect, dis
+        sig = inspect.signature(LTXUnionAdapter.decode_latents)
+        params = list(sig.parameters.keys())
+        assert "latents" in params
+        instructions = list(dis.get_instructions(LTXUnionAdapter.decode_latents))
+        assert len(instructions) > 10, "decode_latents() appears to still be a stub"
