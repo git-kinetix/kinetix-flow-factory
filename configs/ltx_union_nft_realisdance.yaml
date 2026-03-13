@@ -19,6 +19,7 @@ model:
   gemma_path: "/home/ubuntu/comfy/ComfyUI/models/text_encoders/gemma3"
   finetune_type: "lora"
   target_components: ["transformer"]
+  target_modules: "default"
   lora_rank: 64
   lora_alpha: 64
 
