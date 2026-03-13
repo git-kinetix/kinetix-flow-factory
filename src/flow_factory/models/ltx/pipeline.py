@@ -133,9 +133,14 @@ def _merge_lora_into_model(model: nn.Module, lora_path: str) -> int:
     for key, tensor in state_dict.items():
         if ".lora_A." in key:
             base_key = key.replace(".lora_A.weight", "").replace(".lora_A.", "")
+            # Strip ComfyUI prefix — model params don't have it after renaming
+            if base_key.startswith("diffusion_model."):
+                base_key = base_key[len("diffusion_model."):]
             lora_pairs.setdefault(base_key, {})["A"] = tensor
         elif ".lora_B." in key:
             base_key = key.replace(".lora_B.weight", "").replace(".lora_B.", "")
+            if base_key.startswith("diffusion_model."):
+                base_key = base_key[len("diffusion_model."):]
             lora_pairs.setdefault(base_key, {})["B"] = tensor
 
     default_alpha = float(metadata.get("lora_alpha", "1.0"))
