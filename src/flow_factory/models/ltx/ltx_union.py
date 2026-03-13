@@ -497,12 +497,17 @@ class LTXUnionAdapter(BaseAdapter):
 
         device = self.device
 
+        # Move all inference components to device (no-op if already there)
+        for name in self.inference_modules:
+            comp = self.get_component_unwrapped(name)
+            if hasattr(comp, "to"):
+                comp.to(device)
+
         # 1. Encode prompt if needed
         if prompt_embeds is None:
             assert prompt is not None, "Either prompt or prompt_embeds required"
             encoded = self.encode_prompt(prompt=prompt)
             prompt_embeds = encoded["prompt_embeds"]
-            prompt_ids = encoded["prompt_ids"]
             prompt_attention_mask = encoded["prompt_attention_mask"]
             kwargs["audio_prompt_embeds"] = encoded.get("audio_prompt_embeds")
 
