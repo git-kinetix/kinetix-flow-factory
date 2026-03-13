@@ -438,10 +438,11 @@ class LTXUnionAdapter(BaseAdapter):
             context_mask=None,  # ltx_trainer uses None after processing
         )
 
-        # 7. Transformer forward
-        video_pred, _ = transformer(
-            video=modality, audio=None, perturbations=None
-        )
+        # 7. Transformer forward (autocast handles bf16 dtype alignment)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            video_pred, _ = transformer(
+                video=modality, audio=None, perturbations=None
+            )
 
         # 8. Extract target prediction and unpatchify (C3 fix: use VideoLatentShape)
         target_v_pred_3d = video_pred[:, seq_ref:]
