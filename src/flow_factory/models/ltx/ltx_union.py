@@ -137,16 +137,110 @@ class LTXUnionAdapter(BaseAdapter):
     def text_encoder_names(self) -> List[str]:
         return ["text_encoder"]
 
-    # ======================== Encoding (stubs — implemented in Task 5) ========================
+    # ======================== Encoding ========================
 
-    def encode_prompt(self, prompt, **kwargs):
-        raise NotImplementedError("Implemented in Task 5")
+    def encode_prompt(
+        self,
+        prompt: Union[str, List[str]],
+        max_sequence_length: int = 512,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+        **kwargs,
+    ) -> Dict[str, Union[List[Any], torch.Tensor]]:
+        """Encode text prompts via Gemma blocks 1+2 (precompute path)."""
+        device = device or self.device
+        prompt = [prompt] if isinstance(prompt, str) else prompt
 
-    def encode_image(self, images, **kwargs):
-        return None  # Not used; conditioning via encode_video
+        text_encoder = self.get_component_unwrapped("text_encoder")
+        video_features, audio_features, attention_mask = text_encoder.precompute(
+            prompt, padding_side="left"
+        )
 
-    def encode_video(self, videos, **kwargs):
-        raise NotImplementedError("Implemented in Task 5")
+        tokenizer = text_encoder.tokenizer
+        tokenized = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=max_sequence_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        return {
+            "prompt_ids": tokenized.input_ids.to(device),
+            "prompt_embeds": video_features.to(device=device),
+            "prompt_attention_mask": attention_mask.to(device),
+            "_audio_prompt_embeds": audio_features.to(device=device),
+        }
+
+    def encode_image(
+        self,
+        images: Union[Image.Image, List[Image.Image], List[List[Image.Image]]],
+        **kwargs,
+    ) -> Optional[Dict[str, Union[List[Any], torch.Tensor]]]:
+        """Not used for LTX Union. Conditioning via encode_video (IC-LoRA ref)."""
+        return None
+
+    def encode_video(
+        self,
+        videos: Union[torch.Tensor, List[Image.Image], List[List[Image.Image]]],
+        **kwargs,
+    ) -> Dict[str, Union[List[Any], torch.Tensor]]:
+        """Encode pose_depth condition video into reference latents."""
+        import torchvision.transforms.functional as TF
+
+        vae_encoder = self.get_component_unwrapped("vae_encoder")
+        device = self.device
+
+        # Handle pre-batched tensor input (B, C, T, H, W)
+        if isinstance(videos, torch.Tensor):
+            enc_dtype = getattr(vae_encoder, "dtype", None)
+            video_tensor = videos.to(device=device)
+            if isinstance(enc_dtype, torch.dtype):
+                video_tensor = video_tensor.to(dtype=enc_dtype)
+            latents = vae_encoder(video_tensor)
+            return {"reference_latents": latents}
+
+        if isinstance(videos[0], Image.Image):
+            videos = [videos]
+
+        ref_latents_list = []
+        for video_frames in videos:
+            tensors = []
+            for frame in video_frames:
+                t = TF.to_tensor(frame)
+                tensors.append(t)
+            video_tensor = torch.stack(tensors, dim=1).unsqueeze(0)
+            enc_dtype = getattr(vae_encoder, "dtype", None)
+            video_tensor = video_tensor.to(device=device)
+            if isinstance(enc_dtype, torch.dtype):
+                video_tensor = video_tensor.to(dtype=enc_dtype)
+            latent = vae_encoder(video_tensor)
+            ref_latents_list.append(latent.squeeze(0))
+
+        reference_latents = torch.stack(ref_latents_list, dim=0)
+        return {"reference_latents": reference_latents}
+
+    def preprocess_func(
+        self,
+        prompt: List[str],
+        videos: Optional[Any] = None,
+        images: Optional[Any] = None,
+        video_id: Optional[List[str]] = None,
+        **kwargs,
+    ) -> Dict[str, Union[List[Any], torch.Tensor]]:
+        """Custom preprocessing: encode prompt + reference video + pass video_id."""
+        results = {}
+
+        if prompt is not None:
+            results.update(self.encode_prompt(prompt=prompt, **kwargs))
+
+        if videos is not None:
+            results.update(self.encode_video(videos=videos, **kwargs))
+
+        if video_id is not None:
+            results["video_id"] = video_id
+
+        return results
 
     def decode_latents(self, latents, **kwargs):
         raise NotImplementedError("Implemented in Task 6")
