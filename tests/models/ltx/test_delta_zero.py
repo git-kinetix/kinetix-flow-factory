@@ -14,6 +14,8 @@ Requirements:
 
 Run: pytest tests/models/ltx/test_delta_zero.py -v
 """
+import gc
+
 import pytest
 import torch
 import os
@@ -86,6 +88,10 @@ class TestDeltaZeroTransformerStep:
         )
         self.pipeline.transformer.to("cuda", torch.bfloat16)
         self.pipeline.transformer.eval()
+        yield
+        del self.pipeline
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def test_same_input_same_output(self):
         from ltx_core.model.transformer.modality import Modality
@@ -129,6 +135,9 @@ class TestDeltaZeroFullLoop:
         """Construct the adapter the same way the training pipeline does."""
         from accelerate import Accelerator
         from flow_factory.hparams import Arguments
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Build a minimal config with real model paths
         config_dict = {
