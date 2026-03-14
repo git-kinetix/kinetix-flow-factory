@@ -222,8 +222,9 @@ for step_idx in range(len(sigmas) - 1):
     seq_t = orig_3d.shape[1]
     combined_orig = torch.cat([ref_3d.to(DTYPE), orig_3d], dim=1)
 
-    ref_ts = torch.zeros(1, seq_ref, device=DEVICE, dtype=torch.float32)
-    tgt_ts = torch.full((1, seq_t), sigma.item(), device=DEVICE, dtype=torch.float32)
+    # per-token timesteps: [B, seq, 1] for broadcast with [B, seq, C]
+    ref_ts = torch.zeros(1, seq_ref, 1, device=DEVICE, dtype=torch.float32)
+    tgt_ts = torch.full((1, seq_t, 1), sigma.item(), device=DEVICE, dtype=torch.float32)
     per_token_ts = torch.cat([ref_ts, tgt_ts], dim=1)
 
     mod = Modality(

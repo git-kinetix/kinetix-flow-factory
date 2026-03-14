@@ -430,8 +430,10 @@ class LTXUnionAdapter(BaseAdapter):
         if sigma_batch.shape[0] == 1:
             sigma_batch = sigma_batch.expand(batch_size)
 
-        ref_ts = torch.zeros(batch_size, seq_ref, device=device, dtype=torch.float32)
-        target_ts = sigma_batch.unsqueeze(1).expand(batch_size, seq_target)
+        # [B, seq, 1] — trailing dim required for broadcast in X0Model.to_denoised
+        # and to match original pipeline's denoise_mask-derived timestep shape.
+        ref_ts = torch.zeros(batch_size, seq_ref, 1, device=device, dtype=torch.float32)
+        target_ts = sigma_batch.view(batch_size, 1, 1).expand(batch_size, seq_target, 1)
         per_token_timesteps = torch.cat([ref_ts, target_ts], dim=1)
 
         # 4. Build positions from actual latent shapes
