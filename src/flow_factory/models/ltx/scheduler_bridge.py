@@ -359,14 +359,11 @@ class LTXSDEScheduler(SDESchedulerMixin):
         log_prob: Optional[torch.Tensor] = None
 
         if dynamics_type == "ODE":
-            # Replicate original ltx_core roundtrip (3 separate f32→bf16 casts):
+            # Replicate original ltx_core EulerDiffusionStep roundtrip:
             #   to_denoised: x0 = (sample.f32 - v.f32 * sigma.f32).bf16
             #   to_velocity: v' = ((sample.f32 - x0.f32) / sigma.item()).bf16
             #   euler step:  next = (sample.f32 + v'.f32 * dt).bf16
-            # NOTE: to_velocity uses sigma.item() (Python float), NOT tensor division.
-            # On CUDA, f32/python_float uses a different kernel than f32/f32_tensor,
-            # producing slightly different results (~6e-8) that round to different
-            # bf16 values. We must use .item() to match the original exactly.
+            # Uses sigma.item() to match to_velocity's Python float division.
             orig_dtype = latents.dtype
             sigma_item = sigma.float().flatten()[0].item()
             x0 = (latents.float() - noise_pred.float() * sigma.float()).to(orig_dtype)
