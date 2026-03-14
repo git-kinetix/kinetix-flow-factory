@@ -42,11 +42,16 @@ logger = setup_logger(__name__)
 class LTXUnionSample(VideoConditionSample):
     """Sample for LTX Union IC-LoRA video generation."""
 
-    _shared_fields: ClassVar[frozenset] = frozenset({})
+    _shared_fields: ClassVar[frozenset] = frozenset({"ref_F", "ref_H", "ref_W"})
 
     ref_seq_len: Optional[int] = None
     video_id: Optional[str] = None
     reference_latents: Optional[torch.Tensor] = None
+    # Reference latent 5D shape — needed by forward() to build RoPE positions
+    # when reference_latents are stored as 3D patchified tokens.
+    ref_F: Optional[int] = None
+    ref_H: Optional[int] = None
+    ref_W: Optional[int] = None
 
 
 class LTXUnionAdapter(BaseAdapter):
@@ -557,6 +562,8 @@ class LTXUnionAdapter(BaseAdapter):
             ).to(reference_latents.dtype)
             reference_latents = ref_flat.reshape(B_r, C_r, F_r, H_ds, W_ds)
 
+        # Record reference 5D shape before patchifying (for forward() RoPE positions)
+        _, _, ref_F, ref_H, ref_W = reference_latents.shape
         ref_latents_3d = patchifier.patchify(reference_latents)
         seq_ref = ref_latents_3d.shape[1]
 
@@ -635,6 +642,9 @@ class LTXUnionAdapter(BaseAdapter):
                 ref_seq_len=seq_ref,
                 video_id=video_id[b],
                 reference_latents=ref_latents_3d[b],
+                ref_F=ref_F,
+                ref_H=ref_H,
+                ref_W=ref_W,
                 extra_kwargs={
                     **{k: v[b] for k, v in extra_cb_res.items()},
                     "callback_index_map": callback_index_map,
