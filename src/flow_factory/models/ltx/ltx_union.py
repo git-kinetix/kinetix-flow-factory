@@ -363,6 +363,13 @@ class LTXUnionAdapter(BaseAdapter):
         # Conditioning
         prompt_embeds: Optional[torch.Tensor] = None,
         prompt_attention_mask: Optional[torch.Tensor] = None,
+        # Audio state — required for parity with original pipeline.
+        # The original ICLoraPipeline always passes an audio Modality which
+        # participates in A2V/V2A cross-attention, affecting video output.
+        audio_latent: Optional[torch.Tensor] = None,          # [B, seq_audio, C]
+        audio_positions: Optional[torch.Tensor] = None,        # [B, 1, seq_audio, 2]
+        audio_denoise_mask: Optional[torch.Tensor] = None,     # [B, seq_audio, 1]
+        audio_prompt_embeds: Optional[torch.Tensor] = None,    # [B, seq_text, D]
         # Control flags
         noise_level: Optional[float] = None,
         compute_log_prob: bool = True,
@@ -499,17 +506,52 @@ class LTXUnionAdapter(BaseAdapter):
             context_mask=None,  # ltx_trainer uses None after processing
         )
 
+        # 6. Build audio Modality (required for A2V/V2A cross-attention parity)
+        audio_modality = None
+        if audio_latent is not None and audio_prompt_embeds is not None:
+            audio_prompt_embeds = audio_prompt_embeds.to(device=device)
+            audio_ts = audio_denoise_mask * sigma_batch.view(batch_size, 1, 1)
+            audio_modality = Modality(
+                enabled=True,
+                latent=audio_latent,
+                sigma=sigma_batch,
+                timesteps=audio_ts,
+                positions=audio_positions,
+                context=audio_prompt_embeds,
+                context_mask=None,
+            )
+
         # 7. Transformer forward (autocast for bf16 dtype alignment — outside
         #    accelerator context, components may have mixed float32/bf16 dtypes)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            video_pred, _ = transformer(
-                video=modality, audio=None, perturbations=None
+            video_pred, audio_pred = transformer(
+                video=modality, audio=audio_modality, perturbations=None
             )
 
         # 8. Extract target prediction and unpatchify (C3 fix: use VideoLatentShape)
         # Target tokens are FIRST in [target | ref] ordering.
         target_v_pred_3d = video_pred[:, :seq_target]
         v_pred_5d = patchifier.unpatchify(target_v_pred_3d, target_shape)
+
+        # 8b. Step the audio state using EulerDiffusionStep (matches original pipeline)
+        next_audio_latent = None
+        if audio_latent is not None and audio_pred is not None:
+            from ltx_core.components.diffusion_steps import EulerDiffusionStep
+            from ltx_core.utils import to_denoised
+            audio_denoised = to_denoised(audio_latent, audio_pred, audio_ts)
+            # post_process_latent: denoised * mask + clean * (1 - mask)
+            # For audio with no conditioning, clean_latent is zeros and mask is all 1s,
+            # so post_process is a no-op. But replicate it for correctness.
+            audio_clean = torch.zeros_like(audio_latent)
+            audio_denoised = audio_denoised * audio_denoise_mask + audio_clean * (1 - audio_denoise_mask)
+            # Step using the distilled sigma schedule
+            sigmas = self.pipeline.scheduler.timesteps
+            # Find current step index from sigma value
+            step_index = kwargs.get("audio_step_index", 0)
+            all_sigmas = torch.cat([sigmas, torch.zeros(1, device=sigmas.device, dtype=sigmas.dtype)])
+            next_audio_latent = EulerDiffusionStep().step(
+                audio_latent, audio_denoised, all_sigmas, step_index,
+            )
 
         # 9. Scheduler step (operates in 5D)
         output = self.pipeline.scheduler.step(
@@ -523,6 +565,9 @@ class LTXUnionAdapter(BaseAdapter):
             return_dict=True,
             return_kwargs=return_kwargs,
         )
+
+        # Attach audio state to output for inference loop to propagate
+        output.next_audio_latent = next_audio_latent
 
         return output
 
@@ -640,6 +685,35 @@ class LTXUnionAdapter(BaseAdapter):
         target_noised_3d = noised_3d[:, :seq_target]
         latents = patchifier.unpatchify(target_noised_3d, target_shape_5d)
 
+        # 3. Initialize audio state (matches original pipeline's noise_audio_state).
+        # The original uses the SAME generator for both video and audio noise,
+        # so audio noise is drawn right after video noise.
+        from ltx_core.types import AudioLatentShape, VideoPixelShape
+        from ltx_core.tools import AudioLatentTools
+        from ltx_core.components.noisers import GaussianNoiser
+        from ltx_pipelines.utils.types import PipelineComponents
+
+        audio_output_shape = VideoPixelShape(
+            batch=batch_size, frames=num_frames, width=width, height=height,
+            fps=getattr(self.pipeline, "fps", 25.0),
+        )
+        audio_components = PipelineComponents(
+            dtype=torch.bfloat16, device=torch.device(device),
+        )
+        audio_latent_shape = AudioLatentShape.from_video_pixel_shape(audio_output_shape)
+        audio_tools = AudioLatentTools(audio_components.audio_patchifier, audio_latent_shape)
+        audio_noiser = GaussianNoiser(generator=generator)
+        audio_state = audio_noiser(
+            audio_tools.create_initial_state(device, torch.bfloat16),
+            noise_scale=1.0,
+        )
+        audio_latent = audio_state.latent
+        audio_positions = audio_state.positions
+        audio_denoise_mask = audio_state.denoise_mask
+
+        # Get audio prompt embeds
+        audio_prompt_embeds = kwargs.pop("audio_prompt_embeds", None)
+
         # 4. Set sigma schedule
         self.pipeline.scheduler.set_timesteps(num_inference_steps, device=device)
         timesteps = self.pipeline.scheduler.timesteps
@@ -676,13 +750,20 @@ class LTXUnionAdapter(BaseAdapter):
                 ref_seq_len=seq_ref,
                 prompt_embeds=prompt_embeds,
                 prompt_attention_mask=prompt_attention_mask,
+                audio_latent=audio_latent,
+                audio_positions=audio_positions,
+                audio_denoise_mask=audio_denoise_mask,
+                audio_prompt_embeds=audio_prompt_embeds,
                 noise_level=noise_level_val,
                 compute_log_prob=current_compute_log_prob,
                 return_kwargs=["next_latents", "log_prob", "noise_pred"],
+                audio_step_index=i,
                 **kwargs,
             )
 
             latents = output.next_latents
+            if output.next_audio_latent is not None:
+                audio_latent = output.next_audio_latent
             latent_collector.collect(latents, i + 1)
             if current_compute_log_prob and log_prob_collector is not None:
                 log_prob_collector.collect(output.log_prob, i)
