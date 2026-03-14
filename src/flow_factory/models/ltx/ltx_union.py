@@ -606,7 +606,7 @@ class LTXUnionAdapter(BaseAdapter):
 
         # Record reference 5D shape before patchifying (for forward() RoPE positions)
         _, _, ref_F, ref_H, ref_W = reference_latents.shape
-        ref_latents_3d = patchifier.patchify(reference_latents)
+        ref_latents_3d = patchifier.patchify(reference_latents.to(device=device))
         seq_ref = ref_latents_3d.shape[1]
 
         # Create empty target in 3D form, same as create_initial_state does
