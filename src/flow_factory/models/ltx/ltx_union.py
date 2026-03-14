@@ -71,10 +71,11 @@ class LTXUnionAdapter(BaseAdapter):
 
     def load_scheduler(self) -> LTXSDEScheduler:
         """Override: bypass diffusers scheduler registry."""
-        return LTXSDEScheduler(
-            num_inference_steps=getattr(
-                self.config.training_args, "num_inference_steps", 50
-            ),
+        num_steps = getattr(
+            self.config.training_args, "num_inference_steps", 50
+        )
+        scheduler = LTXSDEScheduler(
+            num_inference_steps=num_steps,
             dynamics_type=getattr(
                 self.config.scheduler_args, "dynamics_type", "ODE"
             ),
@@ -82,6 +83,9 @@ class LTXUnionAdapter(BaseAdapter):
                 self.config.scheduler_args, "noise_level", 0.0
             ),
         )
+        # Initialize timestep schedule so trainer can query num_sde_steps
+        scheduler.set_timesteps(num_steps)
+        return scheduler
 
     # ======================== BaseAdapter Hook Overrides ========================
 
