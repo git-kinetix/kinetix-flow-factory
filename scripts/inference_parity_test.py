@@ -196,6 +196,12 @@ with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
     orig_pixels = vae_decoder(orig_latents)
 print(f"  Original decoded: {orig_pixels.shape}")
 
+# Move results to CPU and free GPU memory before FF path
+orig_latents = orig_latents.cpu()
+orig_pixels = orig_pixels.cpu()
+del video_state, audio_state, video_tools, audio_tools, denoise_fn
+import gc; gc.collect(); torch.cuda.empty_cache()
+
 # ---------------------------------------------------------------------------
 # 4. FLOW-FACTORY PATH: replicate inference() + forward()
 # ---------------------------------------------------------------------------
@@ -366,8 +372,8 @@ print("\n" + "=" * 60)
 print("FINAL COMPARISON")
 print("=" * 60)
 
-_report("final_latents", orig_latents, ff_latents)
-_report("decoded_video", orig_pixels, ff_pixels)
+_report("final_latents", orig_latents, ff_latents.cpu())
+_report("decoded_video", orig_pixels, ff_pixels.cpu())
 
 if all_passed:
     print("\n  *** FULL INFERENCE PARITY VERIFIED — BITWISE IDENTICAL ***")
