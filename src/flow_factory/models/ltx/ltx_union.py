@@ -87,6 +87,9 @@ class LTXUnionAdapter(BaseAdapter):
             noise_level=getattr(
                 self.config.scheduler_args, "noise_level", 0.0
             ),
+            use_distilled=getattr(
+                self.config.scheduler_args, "use_distilled", True
+            ),
         )
         # Initialize timestep schedule so trainer can query num_sde_steps
         scheduler.set_timesteps(num_steps)
@@ -418,8 +421,11 @@ class LTXUnionAdapter(BaseAdapter):
             H_ref = kwargs.get("ref_H", latents.shape[3] // self.reference_downscale_factor)
             W_ref = kwargs.get("ref_W", latents.shape[4] // self.reference_downscale_factor)
         seq_ref = ref_latents_3d.shape[1]
+
+        # Token order: [target | ref] — matches original ICLoraPipeline where
+        # VideoConditionByReferenceLatent.apply_to() APPENDS ref tokens.
         combined = torch.cat([
-            ref_latents_3d.to(dtype=dtype), target_latents_3d,
+            target_latents_3d, ref_latents_3d.to(dtype=dtype),
         ], dim=1)
 
         # 3. Build per-token timesteps
@@ -432,12 +438,17 @@ class LTXUnionAdapter(BaseAdapter):
 
         # [B, seq, 1] — trailing dim required for broadcast in X0Model.to_denoised
         # and to match original pipeline's denoise_mask-derived timestep shape.
+        # Order: [target | ref] — target gets sigma, ref gets 0.
         ref_ts = torch.zeros(batch_size, seq_ref, 1, device=device, dtype=torch.float32)
         target_ts = sigma_batch.view(batch_size, 1, 1).expand(batch_size, seq_target, 1)
-        per_token_timesteps = torch.cat([ref_ts, target_ts], dim=1)
+        per_token_timesteps = torch.cat([target_ts, ref_ts], dim=1)
 
-        # 4. Build positions from actual latent shapes
+        # 4. Build positions from actual latent shapes, matching original dtypes.
+        # Original pipeline: target positions go through bf16 roundtrip
+        # (create_initial_state: get_pixel_coords→f32→/fps→to(bf16)),
+        # ref positions stay f32 (VideoConditionByReferenceLatent: get_pixel_coords→f32→/fps).
         _, _, F_lat, H_lat, W_lat = latents.shape
+        fps = getattr(self.pipeline, "fps", 25.0)
 
         target_shape = VideoLatentShape(
             batch=batch_size, channels=128, frames=F_lat,
@@ -446,6 +457,11 @@ class LTXUnionAdapter(BaseAdapter):
         target_positions = patchifier.get_patch_grid_bounds(
             target_shape, device=device,
         )
+        target_positions = get_pixel_coords(
+            target_positions, VIDEO_SCALE_FACTORS, causal_fix=True,
+        ).float()
+        target_positions[:, 0, ...] = target_positions[:, 0, ...] / fps
+        target_positions = target_positions.to(dtype=torch.bfloat16)
 
         ref_shape = VideoLatentShape(
             batch=batch_size, channels=128, frames=F_ref,
@@ -454,6 +470,11 @@ class LTXUnionAdapter(BaseAdapter):
         ref_positions = patchifier.get_patch_grid_bounds(
             ref_shape, device=device,
         )
+        ref_positions = get_pixel_coords(
+            ref_positions, VIDEO_SCALE_FACTORS, causal_fix=True,
+        )
+        ref_positions = ref_positions.to(dtype=torch.float32)
+        ref_positions[:, 0, ...] = ref_positions[:, 0, ...] / fps
 
         # Scale reference positions to match target coordinate space
         if self.reference_downscale_factor != 1:
@@ -461,14 +482,8 @@ class LTXUnionAdapter(BaseAdapter):
             ref_positions[:, 1, ...] *= self.reference_downscale_factor
             ref_positions[:, 2, ...] *= self.reference_downscale_factor
 
-        positions = torch.cat([ref_positions, target_positions], dim=2)
-
-        # Convert latent-space positions to pixel-space (C5 fix)
-        positions = get_pixel_coords(positions, VIDEO_SCALE_FACTORS, causal_fix=True)
-        # Temporal axis must be in seconds, not frame indices
-        fps = getattr(self.pipeline, "fps", 25.0)
-        positions = positions.to(dtype=torch.bfloat16)
-        positions[:, 0, ...] = positions[:, 0, ...] / fps
+        # [target | ref] — cat auto-upcasts bf16+f32 → f32
+        positions = torch.cat([target_positions, ref_positions], dim=2)
 
         # 5. Build Modality
         # prompt_embeds are already processed by encode_prompt (text_encoder.encode
@@ -492,7 +507,8 @@ class LTXUnionAdapter(BaseAdapter):
             )
 
         # 8. Extract target prediction and unpatchify (C3 fix: use VideoLatentShape)
-        target_v_pred_3d = video_pred[:, seq_ref:]
+        # Target tokens are FIRST in [target | ref] ordering.
+        target_v_pred_3d = video_pred[:, :seq_target]
         v_pred_5d = patchifier.unpatchify(target_v_pred_3d, target_shape)
 
         # 9. Scheduler step (operates in 5D)
@@ -571,22 +587,58 @@ class LTXUnionAdapter(BaseAdapter):
         elif isinstance(video_id, str):
             video_id = [video_id]
 
-        # 2. Prepare noise latents [B, 128, F, H, W]
+        # 2. Prepare noise latents matching original ICLoraPipeline noise pattern.
+        # Original: GaussianNoiser generates noise for the combined [target|ref] 3D
+        # patchified state, then applies denoise_mask (target=1, ref=0).
+        # We replicate this to consume the same random values from the generator.
+        patchifier = self.get_component_unwrapped("patchifier")
+        assert reference_latents is not None, "reference_latents required for IC-LoRA"
+
         F_lat = (num_frames - 1) // 8 + 1
         H_lat = height // 32
         W_lat = width // 32
-        latent_shape = (batch_size, 128, F_lat, H_lat, W_lat)
-        latents = randn_tensor(latent_shape, generator=generator, device=device, dtype=torch.bfloat16)
 
-        # 3. Reference latents are already at correct resolution (downscaled in
-        # pixel space during encode_video(), matching original pipeline)
-        patchifier = self.get_component_unwrapped("patchifier")
-        assert reference_latents is not None, "reference_latents required for IC-LoRA"
+        from ltx_core.types import VideoLatentShape
+        target_shape_5d = VideoLatentShape(
+            batch=batch_size, channels=128, frames=F_lat,
+            height=H_lat, width=W_lat,
+        )
 
         # Record reference 5D shape before patchifying (for forward() RoPE positions)
         _, _, ref_F, ref_H, ref_W = reference_latents.shape
         ref_latents_3d = patchifier.patchify(reference_latents)
         seq_ref = ref_latents_3d.shape[1]
+
+        # Create empty target in 3D form, same as create_initial_state does
+        target_zeros_5d = torch.zeros(
+            batch_size, 128, F_lat, H_lat, W_lat,
+            device=device, dtype=torch.bfloat16,
+        )
+        target_zeros_3d = patchifier.patchify(target_zeros_5d)
+        seq_target = target_zeros_3d.shape[1]
+
+        # Combined [target | ref] in 3D, matching original token order
+        combined_3d = torch.cat([
+            target_zeros_3d, ref_latents_3d.to(dtype=torch.bfloat16),
+        ], dim=1)
+
+        # Generate noise for full combined state (same shape as original)
+        noise_3d = torch.randn(
+            *combined_3d.shape,
+            device=device, dtype=torch.bfloat16,
+            generator=generator,
+        )
+
+        # Apply denoise mask: target tokens (mask=1) get noise, ref tokens (mask=0) stay clean
+        denoise_mask = torch.cat([
+            torch.ones(batch_size, seq_target, 1, device=device, dtype=torch.bfloat16),
+            torch.zeros(batch_size, seq_ref, 1, device=device, dtype=torch.bfloat16),
+        ], dim=1)
+        noised_3d = noise_3d * denoise_mask + combined_3d * (1 - denoise_mask)
+
+        # Extract target tokens and unpatchify to 5D
+        target_noised_3d = noised_3d[:, :seq_target]
+        latents = patchifier.unpatchify(target_noised_3d, target_shape_5d)
 
         # 4. Set sigma schedule
         self.pipeline.scheduler.set_timesteps(num_inference_steps, device=device)

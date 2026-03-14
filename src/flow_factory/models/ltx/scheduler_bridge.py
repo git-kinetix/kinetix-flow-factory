@@ -40,11 +40,10 @@ logger = setup_logger(__name__)
 # ---------------------------------------------------------------------------
 # Distilled sigma schedule (used when use_distilled=True)
 # ---------------------------------------------------------------------------
-# A compact set of sigmas that covers the typical LTX-2 distilled regime.
+# Exact distilled sigma schedule from ltx_pipelines/utils/constants.py.
+# These 9 values (8 steps) match the original ICLoraPipeline Stage 1.
 DISTILLED_SIGMA_VALUES: List[float] = [
-    1.0, 0.994, 0.985, 0.970, 0.950, 0.920, 0.880, 0.830,
-    0.770, 0.700, 0.620, 0.540, 0.450, 0.360, 0.270, 0.190,
-    0.120, 0.065, 0.030, 0.010, 0.0,
+    1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0,
 ]
 
 
@@ -127,12 +126,13 @@ class LTXSDEScheduler(SDESchedulerMixin):
         if sigmas is not None:
             sigma_values = list(sigmas)
         elif self.use_distilled:
-            # Sub-sample the distilled schedule to num_inference_steps points
+            # Use the exact distilled schedule. The schedule has len(src)-1 steps.
             src = DISTILLED_SIGMA_VALUES
-            if num_inference_steps >= len(src):
+            num_distilled_steps = len(src) - 1  # 8 steps for 9 sigma values
+            if num_inference_steps >= num_distilled_steps:
                 sigma_values = src
             else:
-                # Evenly spaced indices including first and last
+                # Sub-sample: evenly spaced indices including first and last
                 indices = np.round(
                     np.linspace(0, len(src) - 1, num_inference_steps + 1)
                 ).astype(int)
