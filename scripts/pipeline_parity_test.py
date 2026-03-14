@@ -71,7 +71,7 @@ print("Loading model components...")
 print("=" * 60)
 
 from ltx_trainer.model_loader import (
-    load_transformer, load_video_vae_encoder,
+    load_transformer, load_video_vae_encoder, load_video_vae_decoder,
     load_text_encoder, load_embeddings_processor,
 )
 from ltx_core.components.patchifiers import VideoLatentPatchifier, get_pixel_coords
@@ -91,12 +91,14 @@ dsf = _merge_lora_into_model(transformer, LORA_PATH)
 print(f"  reference_downscale_factor = {dsf}")
 
 vae_encoder = load_video_vae_encoder(MODEL_PATH)
+vae_decoder = load_video_vae_decoder(MODEL_PATH)
 text_encoder = load_text_encoder(GEMMA_PATH)
 embeddings_processor = load_embeddings_processor(MODEL_PATH)
 patchifier = VideoLatentPatchifier(patch_size=1)
 
 transformer.to(DEVICE, DTYPE).eval()
 vae_encoder.to(DEVICE).eval()
+vae_decoder.to(DEVICE, DTYPE).eval()
 text_encoder.to(DEVICE).eval()
 embeddings_processor.to(DEVICE).eval()
 
@@ -324,11 +326,27 @@ orig_final = video_tools.clear_conditioning(orig_state)
 orig_final = video_tools.unpatchify(orig_final)
 _report("final_latents", orig_final.latent, ff_latents)
 
+# ---------------------------------------------------------------------------
+# 7. Decode to pixels and compare videos
+# ---------------------------------------------------------------------------
+print("\n" + "=" * 60)
+print("DECODING TO PIXELS...")
+print("=" * 60)
+
+with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
+    orig_pixels = vae_decoder(orig_final.latent)
+    ff_pixels = vae_decoder(ff_latents)
+
+print(f"  orig_pixels: {orig_pixels.shape}, dtype={orig_pixels.dtype}")
+print(f"  ff_pixels:   {ff_pixels.shape}, dtype={ff_pixels.dtype}")
+_report("decoded_video", orig_pixels, ff_pixels)
+
 if all_passed:
-    print("\n  *** PIPELINE PARITY VERIFIED — BITWISE IDENTICAL ***")
+    print("\n  *** FULL PIPELINE PARITY VERIFIED — BITWISE IDENTICAL (latents + video) ***")
 else:
-    mse = ((orig_final.latent.float() - ff_latents.float()) ** 2).mean().item()
-    print(f"\n  *** PARITY FAILED — MSE = {mse:.2e} ***")
+    mse_lat = ((orig_final.latent.float() - ff_latents.float()) ** 2).mean().item()
+    mse_pix = ((orig_pixels.float() - ff_pixels.float()) ** 2).mean().item()
+    print(f"\n  *** PARITY FAILED — latent MSE={mse_lat:.2e}, pixel MSE={mse_pix:.2e} ***")
 
 print("=" * 60)
 sys.exit(0 if all_passed else 1)
