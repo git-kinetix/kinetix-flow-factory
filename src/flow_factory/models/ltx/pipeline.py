@@ -55,6 +55,7 @@ class LTXUnionPseudoPipeline:
         self.embeddings_processor = embeddings_processor
         self.patchifier = patchifier
         self.scheduler = None  # Set by adapter via load_scheduler() override
+        self.tokenizer = text_encoder.tokenizer  # Expose for BaseAdapter.tokenizer_names
         self.config = config
 
     @property
