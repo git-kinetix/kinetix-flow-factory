@@ -236,8 +236,33 @@ for step_idx in range(len(sigmas) - 1):
     )
     orig_state = replace(orig_state, latent=new_latent)
 
-    if step_idx < 2 or step_idx == len(sigmas) - 2:
-        print(f"  Step {step_idx}: sigma={sigma.item():.6f}, latent norm={new_latent.float().norm().item():.2f}")
+    if step_idx < 3 or step_idx == len(sigmas) - 2:
+        # Extract target-only norm for fair comparison
+        target_lat = new_latent[:, :seq_target]
+        target_5d = patchifier.unpatchify(target_lat, target_shape)
+        print(f"  Step {step_idx}: sigma={sigma.item():.6f}, "
+              f"combined_norm={new_latent.float().norm().item():.2f}, "
+              f"target_norm={target_5d.float().norm().item():.2f}")
+
+# Save per-step target outputs for comparison
+orig_step_outputs = []
+orig_state2 = initial_noised_state
+seq_target = patchifier.get_token_count(target_shape)
+for step_idx in range(len(sigmas) - 1):
+    sigma = sigmas[step_idx]
+    mod = modality_from_latent_state(orig_state2, prompt_embeds, sigma)
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
+        denoised_video, _ = x0_model(video=mod, audio=None, perturbations=None)
+    denoised_video = post_process_latent(denoised_video, orig_state2.denoise_mask, orig_state2.clean_latent)
+    new_latent = stepper.step(
+        sample=orig_state2.latent, denoised_sample=denoised_video,
+        sigmas=sigmas, step_index=step_idx,
+    )
+    orig_state2 = replace(orig_state2, latent=new_latent)
+    # Extract target only
+    target_3d_step = new_latent[:, :seq_target]
+    target_5d_step = patchifier.unpatchify(target_3d_step, target_shape)
+    orig_step_outputs.append(target_5d_step)
 
 # Extract target tokens and unpatchify
 orig_final_state = video_tools.clear_conditioning(orig_state)
@@ -390,7 +415,28 @@ for step_idx in range(len(sigmas) - 1):
     )
     ff_latents = out.next_latents
 
-    if step_idx < 2 or step_idx == len(sigmas) - 2:
+    # Compare with original step output
+    _report(f"step_{step_idx}_output", orig_step_outputs[step_idx], ff_latents)
+
+    if step_idx == 0:
+        # Detailed comparison of the euler step computation
+        # Manually compute euler step the original way (on 3D combined)
+        sigma_val = sigmas[0]
+        sigma_next_val = sigmas[1]
+        # Use the same velocity from step 0
+        orig_velocity_target = orig_step0_velocity[:, :seq_target]
+        # to_denoised for target: (latent - velocity * sigma).bf16
+        orig_denoised_t = (target_3d.float() - orig_velocity_target.float() * sigma_val.float()).to(DTYPE)
+        # to_velocity: ((latent - denoised) / sigma).bf16
+        orig_vel_recon = ((target_3d.float() - orig_denoised_t.float()) / sigma_val.float()).to(DTYPE)
+        # euler step: (latent + velocity * dt).bf16
+        dt_val = sigma_next_val - sigma_val
+        orig_next_t = (target_3d.float() + orig_vel_recon.float() * dt_val.float()).to(DTYPE)
+        manual_orig_5d = patchifier.unpatchify(orig_next_t, target_shape)
+        _report("step0_manual_euler_vs_orig", orig_step_outputs[0], manual_orig_5d)
+        _report("step0_manual_euler_vs_ff", ff_latents, manual_orig_5d)
+
+    if step_idx < 3 or step_idx == len(sigmas) - 2:
         print(f"  Step {step_idx}: sigma={sigma.item():.6f}, latent norm={ff_latents.float().norm().item():.2f}")
 
 print(f"  FF final latent: {ff_latents.shape}")
