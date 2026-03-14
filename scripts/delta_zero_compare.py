@@ -202,7 +202,7 @@ print("Step-by-step denoising comparison...")
 print("=" * 60)
 
 x0_model = X0Model(transformer)
-stepper = EulerDiffusionStep(x0_model)
+stepper = EulerDiffusionStep()
 
 lat_orig = noise_orig.clone()  # 5D
 lat_ff = noise_ff.clone()  # 5D
