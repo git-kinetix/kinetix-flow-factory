@@ -198,11 +198,29 @@ from dataclasses import replace
 
 x0_model = X0Model(transformer)
 
+# Save initial state for later comparison
+initial_noised_state = state
+
 orig_state = state
+orig_step0_velocity = None
 for step_idx in range(len(sigmas) - 1):
     sigma = sigmas[step_idx]
 
     mod = modality_from_latent_state(orig_state, prompt_embeds, sigma)
+
+    # Capture step 0 diagnostics
+    if step_idx == 0:
+        print(f"\n  --- Step 0 Diagnostics (ORIGINAL) ---")
+        print(f"  mod.latent: {mod.latent.shape}, dtype={mod.latent.dtype}")
+        print(f"  mod.sigma: {mod.sigma.shape}, dtype={mod.sigma.dtype}, val={mod.sigma}")
+        print(f"  mod.timesteps: {mod.timesteps.shape}, dtype={mod.timesteps.dtype}")
+        print(f"  mod.positions: {mod.positions.shape}, dtype={mod.positions.dtype}")
+        print(f"  mod.context: {mod.context.shape}")
+        print(f"  mod.attention_mask: {mod.attention_mask}")
+        # Also get raw velocity for comparison
+        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
+            orig_step0_velocity, _ = transformer(video=mod, audio=None, perturbations=None)
+        print(f"  raw velocity norm: {orig_step0_velocity.float().norm().item():.4f}")
 
     # Pass audio=None (matches our FF forward() which also uses audio=None)
     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
@@ -323,16 +341,34 @@ for step_idx in range(len(sigmas) - 1):
     ref_ts = torch.zeros(1, seq_ref, 1, device=DEVICE, dtype=torch.float32)
     per_token_ts = torch.cat([target_ts, ref_ts], dim=1)
 
-    # Build Modality
+    # Build Modality (match sigma shape with original: pass as-is, not unsqueezed)
     mod = Modality(
         enabled=True, latent=combined,
         sigma=sigma.unsqueeze(0), timesteps=per_token_ts,
         positions=positions, context=prompt_embeds, context_mask=None,
     )
 
+    if step_idx == 0:
+        print(f"\n  --- Step 0 Diagnostics (FF) ---")
+        print(f"  mod.latent: {mod.latent.shape}, dtype={mod.latent.dtype}")
+        print(f"  mod.sigma: {mod.sigma.shape}, dtype={mod.sigma.dtype}, val={mod.sigma}")
+        print(f"  mod.timesteps: {mod.timesteps.shape}, dtype={mod.timesteps.dtype}")
+        print(f"  mod.positions: {mod.positions.shape}, dtype={mod.positions.dtype}")
+        print(f"  mod.context: {mod.context.shape}")
+        print(f"  mod.attention_mask: {mod.attention_mask}")
+        # Compare Modality fields with original step 0
+        orig_mod = modality_from_latent_state(initial_noised_state, prompt_embeds, sigmas[0])
+        _report("step0_latent", orig_mod.latent, mod.latent)
+        _report("step0_timesteps", orig_mod.timesteps, mod.timesteps)
+        _report("step0_context", orig_mod.context, mod.context)
+
     # Raw transformer forward (velocity model, not X0Model)
     with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
         velocity_pred, _ = transformer(video=mod, audio=None, perturbations=None)
+
+    if step_idx == 0 and orig_step0_velocity is not None:
+        _report("step0_velocity", orig_step0_velocity, velocity_pred)
+        print(f"  FF velocity norm: {velocity_pred.float().norm().item():.4f}")
 
     # Extract target velocity [target | ref] → first seq_target tokens
     target_v_3d = velocity_pred[:, :seq_target]
