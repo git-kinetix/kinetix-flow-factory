@@ -33,7 +33,7 @@ SEED = 42
 PROMPT = "A person dancing in a studio"
 NUM_STEPS = 10
 HEIGHT = 256
-WIDTH = 416
+WIDTH = 448  # Must satisfy: (WIDTH // dsf) % 32 == 0 for VAE compatibility
 NUM_FRAMES = 9
 DEVICE = "cuda"
 DTYPE = torch.bfloat16

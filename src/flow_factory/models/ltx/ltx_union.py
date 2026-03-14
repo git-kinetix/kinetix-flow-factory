@@ -247,6 +247,12 @@ class LTXUnionAdapter(BaseAdapter):
         target_w = getattr(self.config.training_args, "width", 832)
         ref_h = target_h // dsf
         ref_w = target_w // dsf
+        if ref_h % 32 != 0 or ref_w % 32 != 0:
+            raise ValueError(
+                f"Scaled reference dimensions ({ref_h}x{ref_w}) must be divisible by 32. "
+                f"Original: {target_h}x{target_w}, dsf: {dsf}. "
+                f"Adjust height/width so that height/dsf and width/dsf are both multiples of 32."
+            )
 
         ref_latents_list = []
         for video_frames in videos:

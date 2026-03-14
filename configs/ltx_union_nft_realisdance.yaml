@@ -57,7 +57,7 @@ train:
   kl_beta: 0.01
   num_inference_steps: 50
   height: 256
-  width: 416
+  width: 448  # width/dsf=224 must be divisible by 32 for VAE compatibility
   num_frames: 33
   # Optimization
   seed: 42
