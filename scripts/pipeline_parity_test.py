@@ -237,16 +237,12 @@ for step_idx in range(len(sigmas) - 1):
     orig_state = replace(orig_state, latent=new_latent)
 
     if step_idx < 3 or step_idx == len(sigmas) - 2:
-        # Extract target-only norm for fair comparison
-        target_lat = new_latent[:, :seq_target]
-        target_5d = patchifier.unpatchify(target_lat, target_shape)
-        print(f"  Step {step_idx}: sigma={sigma.item():.6f}, "
-              f"combined_norm={new_latent.float().norm().item():.2f}, "
-              f"target_norm={target_5d.float().norm().item():.2f}")
+        print(f"  Step {step_idx}: sigma={sigma.item():.6f}, combined_norm={new_latent.float().norm().item():.2f}")
 
 # Save per-step target outputs for comparison
 orig_step_outputs = []
 orig_state2 = initial_noised_state
+target_shape = VideoLatentShape(batch=1, channels=128, frames=F_lat, height=H_lat, width=W_lat)
 seq_target = patchifier.get_token_count(target_shape)
 for step_idx in range(len(sigmas) - 1):
     sigma = sigmas[step_idx]
