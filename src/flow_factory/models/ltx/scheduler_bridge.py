@@ -344,8 +344,15 @@ class LTXSDEScheduler(SDESchedulerMixin):
                 next_latents = next_latents.float()
 
         noise_level = to_broadcast_tensor(noise_level, latents)
-        sigma      = to_broadcast_tensor(sigma,      latents)
-        sigma_prev = to_broadcast_tensor(sigma_prev, latents)
+        # For ODE mode: keep sigma in float32 to avoid bf16 rounding
+        # (e.g., sigma=0.9999998 rounds to 1.0 in bf16, changing the step result).
+        # Use a float32 reference tensor for broadcasting shape.
+        if dynamics_type == "ODE":
+            ref_for_broadcast = latents.float()
+        else:
+            ref_for_broadcast = latents
+        sigma      = to_broadcast_tensor(sigma,      ref_for_broadcast)
+        sigma_prev = to_broadcast_tensor(sigma_prev, ref_for_broadcast)
         dt = sigma_prev - sigma   # negative scalar (flow direction)
 
         # -- Compute next sample --
