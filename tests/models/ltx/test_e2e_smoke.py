@@ -66,7 +66,7 @@ def _make_config(tmpdir: str) -> dict:
             "timestep_range": 0.9,
             "num_inference_steps": 5,
             "height": 256,
-            "width": 416,
+            "width": 384,
             "num_frames": 9,
             "per_device_batch_size": 1,
             "group_size": 2,
@@ -85,7 +85,7 @@ def _make_config(tmpdir: str) -> dict:
         "log": {"save_dir": os.path.join(tmpdir, "output"), "save_freq": 999},
         "eval": {
             "height": 256,
-            "width": 416,
+            "width": 384,
             "num_frames": 9,
             "eval_freq": 0,
             "per_device_batch_size": 1,
