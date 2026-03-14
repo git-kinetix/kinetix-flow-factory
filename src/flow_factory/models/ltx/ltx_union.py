@@ -369,6 +369,7 @@ class LTXUnionAdapter(BaseAdapter):
 
         # 2. Handle reference latents: accept 5D or 3D
         assert reference_latents is not None, "reference_latents required for IC-LoRA"
+        reference_latents = reference_latents.to(device=device, dtype=dtype)
         if reference_latents.ndim == 5:
             # 5D: [B, C, F_ref, H_ref, W_ref] — extract shape then patchify
             _, _, F_ref, H_ref, W_ref = reference_latents.shape
