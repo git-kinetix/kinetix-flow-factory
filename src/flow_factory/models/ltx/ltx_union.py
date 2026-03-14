@@ -645,14 +645,17 @@ class LTXUnionAdapter(BaseAdapter):
         timesteps = self.pipeline.scheduler.timesteps
 
         # 5. Trajectory collectors
-        latent_collector = create_trajectory_collector(trajectory_indices, num_inference_steps)
+        # Use actual number of denoising steps (len(timesteps)) not num_inference_steps,
+        # since the distilled schedule may have fewer steps than requested.
+        actual_steps = len(timesteps)
+        latent_collector = create_trajectory_collector(trajectory_indices, actual_steps)
         latent_collector.collect(latents, step_idx=0)
 
         log_prob_collector = None
         if compute_log_prob:
-            log_prob_collector = create_trajectory_collector(trajectory_indices, num_inference_steps)
+            log_prob_collector = create_trajectory_collector(trajectory_indices, actual_steps)
 
-        callback_collector = create_callback_collector(trajectory_indices, num_inference_steps)
+        callback_collector = create_callback_collector(trajectory_indices, actual_steps)
 
         # 6. Denoising loop (C1 fix: include final step to terminal sigma=0)
         for i in range(len(timesteps)):
