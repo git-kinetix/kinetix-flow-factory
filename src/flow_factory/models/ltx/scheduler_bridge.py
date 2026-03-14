@@ -312,22 +312,20 @@ class LTXSDEScheduler(SDESchedulerMixin):
             sigma_prev = timestep_next / 1000
         """
         # -- Resolve sigma / sigma_prev --
-        if timestep_next is not None:
-            if isinstance(timestep, torch.Tensor):
-                sigma = timestep.float() / 1000.0
-            else:
-                sigma = torch.tensor(float(timestep) / 1000.0)
-
-            if isinstance(timestep_next, torch.Tensor):
-                sigma_prev = timestep_next.float() / 1000.0
-            else:
-                sigma_prev = torch.tensor(float(timestep_next) / 1000.0)
-        else:
-            # Look up in schedule
-            t_val = timestep.item() if isinstance(timestep, torch.Tensor) else float(timestep)
+        # Prefer schedule lookup to avoid sigma*1000/1000 float32 roundtrip error.
+        t_val = timestep.item() if isinstance(timestep, torch.Tensor) else float(timestep)
+        try:
             idx = self._index_for_timestep(t_val)
             sigma = self.sigmas[idx]
             sigma_prev = self.sigmas[idx + 1] if idx + 1 < len(self.sigmas) else torch.tensor(0.0)
+        except ValueError:
+            # Timestep not in schedule (e.g., arbitrary timestep in training)
+            sigma = torch.tensor(t_val / 1000.0)
+            if timestep_next is not None:
+                t_next_val = timestep_next.item() if isinstance(timestep_next, torch.Tensor) else float(timestep_next)
+                sigma_prev = torch.tensor(t_next_val / 1000.0)
+            else:
+                sigma_prev = torch.tensor(0.0)
 
         # -- Dynamics type & noise level --
         dynamics_type = dynamics_type or self.dynamics_type
