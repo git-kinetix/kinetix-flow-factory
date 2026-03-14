@@ -356,6 +356,9 @@ class LTXUnionAdapter(BaseAdapter):
         device = latents.device
         dtype = latents.dtype
 
+        # Ensure all inputs are on the correct device (training may pass CPU tensors)
+        prompt_embeds = prompt_embeds.to(device=device)
+
         patchifier = self.get_component_unwrapped("patchifier")
         transformer = self.get_component("transformer")  # accelerator-wrapped
 
