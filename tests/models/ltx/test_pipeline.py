@@ -8,6 +8,8 @@ class FakeModule(nn.Module):
         super().__init__()
         self.linear = nn.Linear(4, 4)
         self._name = name
+        if name == "text_encoder":
+            self.tokenizer = None  # Pipeline.__init__ accesses text_encoder.tokenizer
 
 def make_fake_pipeline():
     from flow_factory.models.ltx.pipeline import LTXUnionPseudoPipeline

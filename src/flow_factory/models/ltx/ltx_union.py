@@ -210,26 +210,26 @@ class LTXUnionAdapter(BaseAdapter):
         videos: Union[torch.Tensor, List[Image.Image], List[List[Image.Image]]],
         **kwargs,
     ) -> Dict[str, Union[List[Any], torch.Tensor]]:
-        """Encode pose_depth condition video into reference latents."""
+        """Encode pose_depth condition video into reference latents.
+
+        Matches the original ltx_trainer ValidationSampler._encode_video():
+        - Pixel range [-1, 1] (not [0, 1])
+        - Pixel-space downscaling via reference_downscale_factor before encoding
+        """
         import torchvision.transforms.functional as TF
 
         vae_encoder = self.get_component_unwrapped("vae_encoder")
         device = self.device
+        dsf = self.reference_downscale_factor
 
         # Ensure encoder is on the right device
         vae_encoder.to(device)
 
-        # Detect encoder dtype from parameters (nn.Module has no .dtype attr)
-        try:
-            enc_dtype = next(vae_encoder.parameters()).dtype
-        except StopIteration:
-            enc_dtype = None
-
         if isinstance(videos, torch.Tensor):
-            video_tensor = videos.to(device=device)
-            if isinstance(enc_dtype, torch.dtype):
-                video_tensor = video_tensor.to(dtype=enc_dtype)
-            latents = vae_encoder(video_tensor)
+            # Pre-formed tensor: assume already in correct range
+            video_tensor = videos.to(device=device, dtype=torch.float32)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                latents = vae_encoder(video_tensor)
             return {"reference_latents": latents}
 
         # Unwrap nested dataset format: List[List[List[PIL]]] → List[List[PIL]]
@@ -242,17 +242,40 @@ class LTXUnionAdapter(BaseAdapter):
         if isinstance(videos[0], Image.Image):
             videos = [videos]
 
+        # Get target dimensions for reference from training config
+        target_h = getattr(self.config.training_args, "height", 512)
+        target_w = getattr(self.config.training_args, "width", 832)
+        ref_h = target_h // dsf
+        ref_w = target_w // dsf
+
         ref_latents_list = []
         for video_frames in videos:
             tensors = []
             for frame in video_frames:
-                t = TF.to_tensor(frame)
+                t = TF.to_tensor(frame)  # [C, H, W] in [0, 1]
                 tensors.append(t)
-            video_tensor = torch.stack(tensors, dim=1).unsqueeze(0)
-            video_tensor = video_tensor.to(device=device)
-            if isinstance(enc_dtype, torch.dtype):
-                video_tensor = video_tensor.to(dtype=enc_dtype)
-            latent = vae_encoder(video_tensor)
+            # [F, C, H, W] in [0, 1]
+            video_tensor = torch.stack(tensors, dim=0)
+
+            # Pixel-space resize to reference resolution (matching original pipeline)
+            cur_h, cur_w = video_tensor.shape[2], video_tensor.shape[3]
+            if cur_h != ref_h or cur_w != ref_w:
+                video_tensor = torch.nn.functional.interpolate(
+                    video_tensor, size=(ref_h, ref_w),
+                    mode="bilinear", align_corners=False,
+                )
+
+            # Trim to valid frame count (k*8 + 1)
+            valid_frames = (video_tensor.shape[0] - 1) // 8 * 8 + 1
+            video_tensor = video_tensor[:valid_frames]
+
+            # Rearrange to [B, C, F, H, W] and convert to [-1, 1] (matching original)
+            video_tensor = video_tensor.permute(1, 0, 2, 3).unsqueeze(0)  # [1, C, F, H, W]
+            video_tensor = video_tensor * 2.0 - 1.0  # [0, 1] → [-1, 1]
+
+            video_tensor = video_tensor.to(device=device, dtype=torch.float32)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                latent = vae_encoder(video_tensor)
             ref_latents_list.append(latent.squeeze(0))
 
         reference_latents = torch.stack(ref_latents_list, dim=0)
@@ -435,8 +458,8 @@ class LTXUnionAdapter(BaseAdapter):
         # Convert latent-space positions to pixel-space (C5 fix)
         positions = get_pixel_coords(positions, VIDEO_SCALE_FACTORS, causal_fix=True)
         # Temporal axis must be in seconds, not frame indices
-        fps = getattr(self.pipeline, "fps", 24.0)
-        positions = positions.to(dtype=torch.float32)
+        fps = getattr(self.pipeline, "fps", 25.0)
+        positions = positions.to(dtype=torch.bfloat16)
         positions[:, 0, ...] = positions[:, 0, ...] / fps
 
         # 5. Build Modality
@@ -547,20 +570,10 @@ class LTXUnionAdapter(BaseAdapter):
         latent_shape = (batch_size, 128, F_lat, H_lat, W_lat)
         latents = randn_tensor(latent_shape, generator=generator, device=device, dtype=torch.bfloat16)
 
-        # 3. Downscale reference latents to match IC-LoRA training resolution
+        # 3. Reference latents are already at correct resolution (downscaled in
+        # pixel space during encode_video(), matching original pipeline)
         patchifier = self.get_component_unwrapped("patchifier")
         assert reference_latents is not None, "reference_latents required for IC-LoRA"
-        if self.reference_downscale_factor > 1 and reference_latents.ndim == 5:
-            B_r, C_r, F_r, H_r, W_r = reference_latents.shape
-            H_ds = H_r // self.reference_downscale_factor
-            W_ds = W_r // self.reference_downscale_factor
-            # Spatial-only resize: reshape to [B*C*F, 1, H, W] for 2D interpolate
-            ref_flat = reference_latents.reshape(B_r * C_r * F_r, 1, H_r, W_r)
-            ref_flat = torch.nn.functional.interpolate(
-                ref_flat.float(), size=(H_ds, W_ds), mode="bilinear",
-                align_corners=False,
-            ).to(reference_latents.dtype)
-            reference_latents = ref_flat.reshape(B_r, C_r, F_r, H_ds, W_ds)
 
         # Record reference 5D shape before patchifying (for forward() RoPE positions)
         _, _, ref_F, ref_H, ref_W = reference_latents.shape

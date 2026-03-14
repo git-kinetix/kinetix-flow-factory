@@ -138,10 +138,17 @@ class LTXSDEScheduler(SDESchedulerMixin):
                 ).astype(int)
                 sigma_values = [src[i] for i in indices]
         else:
-            # Standard linear schedule from sigma_max to sigma_min
-            sigma_values = list(
-                np.linspace(self.sigma_max, self.sigma_min, num_inference_steps + 1)
-            )
+            # Use LTX2Scheduler (shifted + stretched) to match original pipeline
+            try:
+                from ltx_core.components.schedulers import LTX2Scheduler
+                ltx_sched = LTX2Scheduler()
+                sigma_tensor = ltx_sched.execute(steps=num_inference_steps)
+                sigma_values = sigma_tensor.tolist()
+            except ImportError:
+                # Fallback to linear schedule if ltx_core not available
+                sigma_values = list(
+                    np.linspace(self.sigma_max, self.sigma_min, num_inference_steps + 1)
+                )
 
         # Ensure monotonically non-increasing
         self.sigmas = torch.tensor(sigma_values, dtype=torch.float32, device=device)
@@ -322,16 +329,19 @@ class LTXSDEScheduler(SDESchedulerMixin):
             sigma = self.sigmas[idx]
             sigma_prev = self.sigmas[idx + 1] if idx + 1 < len(self.sigmas) else torch.tensor(0.0)
 
-        # -- Numerical promotion --
-        noise_pred = noise_pred.float()
-        latents = latents.float()
-        if next_latents is not None:
-            next_latents = next_latents.float()
-
-        # -- Dynamics type & noise level --
+        # -- Dynamics type --
         dynamics_type = dynamics_type or self.dynamics_type
         if self.is_eval or dynamics_type == "ODE":
             noise_level = 0.0
+
+        # -- Numerical promotion --
+        # ODE mode: preserve native dtype to match original EulerDiffusionStep
+        # SDE modes: promote to float32 for precise log_prob computation
+        if dynamics_type != "ODE":
+            noise_pred = noise_pred.float()
+            latents = latents.float()
+            if next_latents is not None:
+                next_latents = next_latents.float()
         elif noise_level is None:
             noise_level = self.get_noise_level_for_sigma(sigma)
 
@@ -344,7 +354,14 @@ class LTXSDEScheduler(SDESchedulerMixin):
         log_prob: Optional[torch.Tensor] = None
 
         if dynamics_type == "ODE":
-            next_latents_mean = latents + noise_pred * dt
+            # Replicate original X0Model + EulerDiffusionStep roundtrip to
+            # match bfloat16 rounding behavior exactly:
+            #   x0 = sample - velocity * sigma     (X0Model.to_denoised)
+            #   v  = (sample - x0) / sigma          (EulerDiffusionStep._to_velocity)
+            #   next = sample + v * dt              (Euler step)
+            x0 = latents - noise_pred * sigma
+            velocity = (latents - x0) / sigma
+            next_latents_mean = latents + velocity * dt
             std_dev_t = torch.zeros_like(sigma)
 
             if next_latents is None:

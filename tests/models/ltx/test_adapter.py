@@ -92,6 +92,7 @@ class TestEncodingMethods:
 
         adapter = MagicMock(spec=LTXUnionAdapter)
         adapter.device = torch.device("cpu")
+        adapter.reference_downscale_factor = 1
 
         # Mock VAE encoder
         mock_vae = MagicMock()
