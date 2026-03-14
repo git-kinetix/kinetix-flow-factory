@@ -4,96 +4,53 @@
 
 **Goal:** Make Flow-Factory inference produce bitwise-identical output to the original ICLoraPipeline (Stage 1, skip_stage_2=True) with the same seed.
 
-**Architecture:** Fix 4 differences: sigma schedule, token ordering, noise generation, and positions dtype. Then write a delta-zero comparison test that runs both pipelines with the same seed and asserts torch.equal on the final latents.
+**Architecture:** Fix 5 differences: sigma schedule, token ordering, noise generation, positions dtype, and ODE velocity division. Then write a delta-zero comparison test that runs both pipelines with the same seed and asserts torch.equal on the final latents.
 
 **Tech Stack:** PyTorch, ltx_core, ltx_pipelines (original), Flow-Factory
+
+**Status: COMPLETE** — All 5 differences fixed, parity verified bitwise on H200 (2026-03-14).
 
 ---
 
 ## Identified Differences
 
-| # | Difference | Original | Flow-Factory (current) |
+| # | Difference | Original | Flow-Factory (fixed) |
 |---|-----------|----------|----------------------|
-| 1 | Sigma schedule | `[1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]` (8 steps) | `LTX2Scheduler().execute(steps=50)` (50 steps, shifted+stretched) |
-| 2 | Token order | `[target \| ref]` (ref appended) | `[ref \| target]` (ref prepended) |
-| 3 | Noise generation | Combined 3D noise `(B, seq_target+seq_ref, 128)` with mask | Target-only 5D noise `(B, 128, F, H, W)` |
-| 4 | Positions dtype | Target=bf16, ref=f32, cat→f32 | All cast to bf16 |
+| 1 | Sigma schedule | `[1.0, 0.99375, ..., 0.0]` (8 steps) | Fixed: exact distilled values |
+| 2 | Token order | `[target \| ref]` (ref appended) | Fixed: `[target \| ref]` |
+| 3 | Noise generation | Combined 3D noise with mask | Fixed: combined 3D noise with mask |
+| 4 | Positions dtype | Target=bf16, ref=f32, cat→f32 | Fixed: matching dtypes |
+| 5 | ODE velocity division | `to_velocity` uses `sigma.item()` (Python float) | Fixed: uses `.item()` to match CUDA kernel |
 
 ---
 
-### Task 1: Fix Sigma Schedule
+### Task 1: Fix Sigma Schedule — DONE
 
-**Files:**
-- Modify: `src/flow_factory/models/ltx/scheduler_bridge.py:44-48`
+- [x] Replace DISTILLED_SIGMA_VALUES with exact original values
+- [x] Fix sub-sampling check (`num_inference_steps >= num_distilled_steps`)
 
-- [ ] **Step 1: Replace DISTILLED_SIGMA_VALUES with exact original values**
+### Task 2: Fix Token Ordering — DONE
 
-```python
-DISTILLED_SIGMA_VALUES: List[float] = [
-    1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0
-]
-```
+- [x] Swap to `[target | ref]` order in forward()
+- [x] Extract velocity from first tokens (`[:, :seq_target]`)
 
-- [ ] **Step 2: Verify the schedule has 8 steps (9 sigma values including terminal 0)**
+### Task 3: Fix Positions Dtype — DONE
 
----
+- [x] Target positions: bf16 roundtrip
+- [x] Ref positions: stay f32
+- [x] Cat auto-upcasts to f32
 
-### Task 2: Fix Token Ordering
+### Task 4: Fix Noise Generation — DONE
 
-**Files:**
-- Modify: `src/flow_factory/models/ltx/ltx_union.py` — `forward()` method
+- [x] Combined 3D noise matching GaussianNoiser pattern
 
-Changes needed in forward():
-1. `combined = torch.cat([target_latents_3d, ref_latents_3d], dim=1)` (swap order)
-2. `per_token_timesteps = torch.cat([target_ts, ref_ts], dim=1)` (swap order)
-3. `positions = torch.cat([target_positions, ref_positions], dim=2)` (swap order)
-4. Extract velocity: `target_v_pred_3d = video_pred[:, :seq_target]` (first tokens, not last)
+### Task 5: Fix ODE Velocity Division — DONE
 
----
+- [x] Use `sigma.item()` in scheduler ODE path to match `to_velocity()`'s Python float division
+- [x] Root cause: CUDA kernel for `f32/f64` differs from `f32/f32`, producing ~6e-8 diffs that round to different bf16 values
 
-### Task 3: Fix Positions Dtype
+### Task 6: Write & Run Comparison Test — DONE
 
-**Files:**
-- Modify: `src/flow_factory/models/ltx/ltx_union.py` — `forward()` method
-
-Changes:
-1. Target positions: `get_pixel_coords → float32 → /fps → to(bfloat16)` (matching create_initial_state)
-2. Ref positions: `get_pixel_coords → to(float32) → /fps → scale by dsf` (matching VideoConditionByReferenceLatent)
-3. Concatenate: `torch.cat([target_bf16, ref_f32])` → auto-upcasts to f32
-4. Remove the `positions = positions.to(dtype=torch.bfloat16)` line
-
----
-
-### Task 4: Fix Noise Generation
-
-**Files:**
-- Modify: `src/flow_factory/models/ltx/ltx_union.py` — `inference()` method
-
-Instead of generating 5D target-only noise, replicate the original's combined-state noise:
-1. Patchify zeros target → target_3d
-2. Combine: `[target_3d, ref_3d]` (matching token order)
-3. Generate `torch.randn(B, seq_total, 128, generator=gen, dtype=bf16)`
-4. Apply denoise mask: `noise * mask + combined * (1 - mask)`
-5. Extract target tokens, unpatchify to 5D
-
----
-
-### Task 5: Write Comparison Test
-
-**Files:**
-- Create: `scripts/pipeline_parity_test.py`
-
-Script that runs on H200:
-1. Loads model weights (same as delta_zero_compare.py)
-2. Runs original ICLoraPipeline(skip_stage_2=True) to get Stage 1 latents
-3. Runs our LTXUnionAdapter.inference() with same seed, prompt, reference
-4. Asserts `torch.equal(original_latents, ff_latents)`
-5. If not equal, reports per-step divergence
-
----
-
-### Task 6: Run Test on H200
-
-- [ ] Push fixes to remote
-- [ ] Run test
-- [ ] Fix any remaining issues until 0 MSE verified
+- [x] `scripts/pipeline_parity_test.py` — single-transformer-call approach
+- [x] All 8 steps bitwise identical
+- [x] Final latents bitwise identical
