@@ -45,7 +45,7 @@ class MPJPERewardModel(PointwiseRewardModel):
     @property
     def scorer(self):
         if self._scorer is None:
-            from DiffusionNFT.flow_grpo.gvhmr_pose_scorer import GVHMRPoseScorer
+            from .gvhmr_pose_scorer import GVHMRPoseScorer
             self._scorer = GVHMRPoseScorer(
                 device=self.device, gvhmr_root=self._gvhmr_root
             )
@@ -85,7 +85,7 @@ class MPJPERewardModel(PointwiseRewardModel):
                 gen_joints = self.scorer._video_to_joints(vid_input)
                 T = min(gen_joints.shape[0], gt_joints.shape[0])
 
-                from DiffusionNFT.flow_grpo.gvhmr_pose_scorer import GVHMRPoseScorer
+                from .gvhmr_pose_scorer import GVHMRPoseScorer
                 mpjpe = GVHMRPoseScorer._pelvis_aligned_mpjpe(
                     gen_joints[:T], gt_joints[:T].to(gen_joints.device)
                 )
