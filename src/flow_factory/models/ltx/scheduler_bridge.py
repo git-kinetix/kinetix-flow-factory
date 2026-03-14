@@ -329,10 +329,12 @@ class LTXSDEScheduler(SDESchedulerMixin):
             sigma = self.sigmas[idx]
             sigma_prev = self.sigmas[idx + 1] if idx + 1 < len(self.sigmas) else torch.tensor(0.0)
 
-        # -- Dynamics type --
+        # -- Dynamics type & noise level --
         dynamics_type = dynamics_type or self.dynamics_type
         if self.is_eval or dynamics_type == "ODE":
             noise_level = 0.0
+        elif noise_level is None:
+            noise_level = self.get_noise_level_for_sigma(sigma)
 
         # -- Numerical promotion --
         # ODE mode: preserve native dtype to match original EulerDiffusionStep
@@ -342,8 +344,6 @@ class LTXSDEScheduler(SDESchedulerMixin):
             latents = latents.float()
             if next_latents is not None:
                 next_latents = next_latents.float()
-        elif noise_level is None:
-            noise_level = self.get_noise_level_for_sigma(sigma)
 
         noise_level = to_broadcast_tensor(noise_level, latents)
         sigma      = to_broadcast_tensor(sigma,      latents)
@@ -354,14 +354,14 @@ class LTXSDEScheduler(SDESchedulerMixin):
         log_prob: Optional[torch.Tensor] = None
 
         if dynamics_type == "ODE":
-            # Replicate original X0Model + EulerDiffusionStep roundtrip to
-            # match bfloat16 rounding behavior exactly:
-            #   x0 = sample - velocity * sigma     (X0Model.to_denoised)
-            #   v  = (sample - x0) / sigma          (EulerDiffusionStep._to_velocity)
-            #   next = sample + v * dt              (Euler step)
-            x0 = latents - noise_pred * sigma
-            velocity = (latents - x0) / sigma
-            next_latents_mean = latents + velocity * dt
+            # Replicate original ltx_core roundtrip (3 separate f32→bf16 casts):
+            #   to_denoised: x0 = (sample.f32 - v.f32 * sigma.f32).bf16
+            #   to_velocity: v' = ((sample.f32 - x0.f32) / sigma).bf16
+            #   euler step:  next = (sample.f32 + v'.f32 * dt).bf16
+            orig_dtype = latents.dtype
+            x0 = (latents.float() - noise_pred.float() * sigma.float()).to(orig_dtype)
+            velocity = ((latents.float() - x0.float()) / sigma.float()).to(orig_dtype)
+            next_latents_mean = (latents.float() + velocity.float() * dt.float()).to(orig_dtype)
             std_dev_t = torch.zeros_like(sigma)
 
             if next_latents is None:
