@@ -65,7 +65,7 @@ from ltx_core.components.patchifiers import VideoLatentPatchifier
 from ltx_core.components.schedulers import LTX2Scheduler
 from ltx_core.components.diffusion_steps import EulerDiffusionStep
 from ltx_core.model.transformer import X0Model
-from ltx_core.model.transformer.model import to_denoised, to_velocity
+from ltx_core.utils import to_denoised, to_velocity
 from ltx_core.model.transformer.modality import Modality
 from ltx_core.types import VideoLatentShape, VIDEO_SCALE_FACTORS
 from ltx_core.components.patchifiers import get_pixel_coords
