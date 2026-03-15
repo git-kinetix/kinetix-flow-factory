@@ -28,6 +28,18 @@ import torch
 from dataclasses import replace
 
 # ---------------------------------------------------------------------------
+# Force deterministic CUDA operations
+# ---------------------------------------------------------------------------
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# Force math SDP backend (deterministic) over flash/mem-efficient (non-deterministic)
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 MODEL_PATH = os.environ["LTX_MODEL_PATH"]
@@ -278,6 +290,23 @@ ff_audio = audio_state_B.latent
 audio_positions = audio_state_B.positions
 audio_denoise_mask = audio_state_B.denoise_mask
 del audio_noiser_B, audio_state_B
+
+# Verify initial states match
+print("  Verifying initial states match Path A...")
+# Re-create Path A initial state for comparison (same seed, same code)
+gen_verify = torch.Generator(device=DEVICE).manual_seed(SEED)
+noiser_verify = GaussianNoiser(generator=gen_verify)
+cond_verify = VideoConditionByReferenceLatent(
+    latent=ref_latents, downscale_factor=dsf, strength=1.0,
+)
+components_verify = PipelineComponents(dtype=DTYPE, device=torch.device(DEVICE))
+vs_verify, vt_verify = noise_video_state(
+    output_shape=output_shape, noiser=noiser_verify, conditionings=[cond_verify],
+    components=components_verify, dtype=DTYPE, device=torch.device(DEVICE), noise_scale=1.0,
+)
+init_target_A = patchifier.unpatchify(vs_verify.latent[:, :seq_target], target_shape)
+_report("initial_noise_cross_check", init_target_A, ff_latents)
+del gen_verify, noiser_verify, cond_verify, components_verify, vs_verify, vt_verify, init_target_A
 
 # FF scheduler
 ff_sched = LTXSDEScheduler(
