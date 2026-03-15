@@ -4,9 +4,8 @@ End-to-end parity test: verify that Flow-Factory's denoising produces
 BITWISE IDENTICAL output to the original LTX ICLoraPipeline using
 real RealisDance-Val data.
 
-This is the definitive test: same model, same seed, same prompt, same
-conditioning video, same resolution — two independent code paths must
-produce torch.equal() results at every step.
+Uses a single transformer call per step shared between both stepping methods
+to avoid OOM on the 22B model.
 
 Environment variables:
     LTX_MODEL_PATH       — path to ltx-2.3 distilled .safetensors
@@ -75,7 +74,7 @@ print("Loading model components...")
 print("=" * 60)
 
 from ltx_trainer.model_loader import (
-    load_transformer, load_video_vae_encoder, load_video_vae_decoder,
+    load_transformer, load_video_vae_encoder,
     load_text_encoder, load_embeddings_processor,
 )
 from ltx_core.components.patchifiers import VideoLatentPatchifier, get_pixel_coords
@@ -94,7 +93,6 @@ from ltx_pipelines.utils.helpers import (
     modality_from_latent_state, post_process_latent,
     noise_video_state, noise_audio_state,
 )
-from ltx_pipelines.utils import simple_denoising_func
 from ltx_pipelines.utils.constants import DISTILLED_SIGMA_VALUES
 
 from flow_factory.models.ltx.pipeline import _merge_lora_into_model
@@ -196,12 +194,13 @@ print(f"  Ref latent: F={ref_F}, H={ref_H}, W={ref_W} ({seq_ref} tokens)")
 print(f"  Sigma schedule ({n_steps} steps): {[f'{s:.6f}' for s in sigmas.tolist()]}")
 
 # =====================================================================
-# PATH A: ORIGINAL ICLoraPipeline (using ltx_core functions directly)
+# 4. Initialize BOTH paths from same seed
 # =====================================================================
 print("\n" + "=" * 60)
-print("PATH A: Original ICLoraPipeline denoising")
+print("Initializing both paths...")
 print("=" * 60)
 
+# --- PATH A: Original (noise_video_state + noise_audio_state) ---
 output_shape = VideoPixelShape(
     batch=1, frames=NUM_FRAMES, width=WIDTH, height=HEIGHT, fps=FRAME_RATE,
 )
@@ -215,7 +214,6 @@ cond_A = VideoConditionByReferenceLatent(
     latent=ref_latents, downscale_factor=dsf, strength=1.0,
 )
 
-# Create video + audio state (same RNG order as original pipeline)
 video_state_A, video_tools_A = noise_video_state(
     output_shape=output_shape, noiser=noiser_A, conditionings=[cond_A],
     components=components, dtype=DTYPE, device=torch.device(DEVICE), noise_scale=1.0,
@@ -225,17 +223,129 @@ audio_state_A, audio_tools_A = noise_audio_state(
     components=components, dtype=DTYPE, device=torch.device(DEVICE), noise_scale=1.0,
 )
 
-print(f"  Video state: {video_state_A.latent.shape}")
-print(f"  Audio state: {audio_state_A.latent.shape}")
+print(f"  Path A video state: {video_state_A.latent.shape} (seq={video_state_A.latent.shape[1]})")
+print(f"  Path A audio state: {audio_state_A.latent.shape}")
 
-denoise_fn = simple_denoising_func(
-    video_context=video_context, audio_context=audio_context, transformer=transformer,
+# --- PATH B: Flow-Factory (manual noise matching inference()) ---
+gen_B = torch.Generator(device=DEVICE).manual_seed(SEED)
+
+target_zeros_5d = torch.zeros(1, 128, F_lat, H_lat, W_lat, device=DEVICE, dtype=DTYPE)
+target_zeros_3d = patchifier.patchify(target_zeros_5d)
+ref_latents_3d = patchifier.patchify(ref_latents)
+
+combined_3d = torch.cat([
+    target_zeros_3d, ref_latents_3d.to(dtype=DTYPE),
+], dim=1)
+
+noise_3d = torch.randn(*combined_3d.shape, device=DEVICE, dtype=DTYPE, generator=gen_B)
+denoise_mask = torch.cat([
+    torch.ones(1, seq_target, 1, device=DEVICE, dtype=DTYPE),
+    torch.zeros(1, seq_ref, 1, device=DEVICE, dtype=DTYPE),
+], dim=1)
+noised_3d = noise_3d * denoise_mask + combined_3d * (1 - denoise_mask)
+target_noised_3d = noised_3d[:, :seq_target]
+ff_latents = patchifier.unpatchify(target_noised_3d, target_shape)
+
+# Audio state (same generator, after video noise)
+audio_components_B = PipelineComponents(dtype=DTYPE, device=torch.device(DEVICE))
+audio_latent_shape = AudioLatentShape.from_video_pixel_shape(output_shape)
+audio_tools_B = AudioLatentTools(audio_components_B.audio_patchifier, audio_latent_shape)
+audio_noiser_B = GaussianNoiser(generator=gen_B)
+audio_state_B = audio_noiser_B(
+    audio_tools_B.create_initial_state(DEVICE, DTYPE), noise_scale=1.0,
 )
+ff_audio_latent = audio_state_B.latent
+audio_positions = audio_state_B.positions
+audio_denoise_mask = audio_state_B.denoise_mask
 
-orig_target_per_step = []
-orig_audio_per_step = []
+print(f"  Path B ff_latents: {ff_latents.shape}")
+print(f"  Path B audio: {ff_audio_latent.shape}")
+
+# Verify initial noise matches between paths
+orig_target_init = patchifier.unpatchify(video_state_A.latent[:, :seq_target], target_shape)
+_report("initial_video_noise", orig_target_init, ff_latents)
+_report("initial_audio_noise", audio_state_A.latent, ff_audio_latent)
+
+# Pre-build FF positions (same as forward() computes)
+fps = FRAME_RATE
+target_positions = patchifier.get_patch_grid_bounds(target_shape, device=DEVICE)
+target_positions = get_pixel_coords(target_positions, VIDEO_SCALE_FACTORS, causal_fix=True).float()
+target_positions[:, 0, ...] = target_positions[:, 0, ...] / fps
+target_positions = target_positions.to(dtype=torch.bfloat16)
+
+ref_positions = patchifier.get_patch_grid_bounds(ref_shape_5d, device=DEVICE)
+ref_positions = get_pixel_coords(ref_positions, VIDEO_SCALE_FACTORS, causal_fix=True)
+ref_positions = ref_positions.to(dtype=torch.float32)
+ref_positions[:, 0, ...] = ref_positions[:, 0, ...] / fps
+if dsf != 1:
+    ref_positions = ref_positions.clone()
+    ref_positions[:, 1, ...] *= dsf
+    ref_positions[:, 2, ...] *= dsf
+ff_positions = torch.cat([target_positions, ref_positions], dim=2)
+ff_ref_ts = torch.zeros(1, seq_ref, 1, device=DEVICE, dtype=torch.float32)
+
+# FF scheduler
+ff_sched = LTXSDEScheduler(
+    num_inference_steps=n_steps, dynamics_type="ODE", noise_level=0.0, use_distilled=True,
+)
+ff_sched.set_timesteps(n_steps, device=DEVICE)
+ff_timesteps = ff_sched.timesteps
+
+# =====================================================================
+# 5. Main loop: single transformer call per step, both stepping methods
+# =====================================================================
+print("\n" + "=" * 60)
+print("Denoising loop: single transformer call per step")
+print("=" * 60)
+
 for step_idx in range(n_steps):
-    dv, da = denoise_fn(video_state_A, audio_state_A, sigmas, step_idx)
+    sigma_val = sigmas[step_idx]
+
+    # --- Build ORIGINAL Modality from state ---
+    orig_video_mod = modality_from_latent_state(video_state_A, video_context, sigma_val)
+    orig_audio_mod = modality_from_latent_state(audio_state_A, audio_context, sigma_val)
+
+    # --- Build FF Modality (what forward() constructs) ---
+    sigma_batch = sigma_val.view(1)
+    ff_target_3d = patchifier.patchify(ff_latents)
+    ff_combined = torch.cat([ff_target_3d, ref_latents_3d.to(dtype=DTYPE)], dim=1)
+    ff_target_ts = sigma_batch.view(1, 1, 1).expand(1, seq_target, 1)
+    ff_per_token_ts = torch.cat([ff_target_ts, ff_ref_ts], dim=1)
+
+    ff_video_mod = Modality(
+        enabled=True, latent=ff_combined, sigma=sigma_batch,
+        timesteps=ff_per_token_ts, positions=ff_positions,
+        context=video_context, context_mask=None,
+    )
+
+    audio_ts = audio_denoise_mask * sigma_batch.view(1, 1, 1)
+    ff_audio_mod = Modality(
+        enabled=True, latent=ff_audio_latent, sigma=sigma_batch,
+        timesteps=audio_ts, positions=audio_positions,
+        context=audio_context, context_mask=None,
+    )
+
+    # --- Verify Modality inputs match ---
+    inputs_match = (
+        torch.equal(orig_video_mod.latent, ff_video_mod.latent)
+        and torch.equal(orig_video_mod.timesteps, ff_video_mod.timesteps)
+        and torch.equal(orig_video_mod.positions, ff_video_mod.positions)
+        and torch.equal(orig_video_mod.context, ff_video_mod.context)
+        and torch.equal(orig_audio_mod.latent, ff_audio_mod.latent)
+        and torch.equal(orig_audio_mod.timesteps, ff_audio_mod.timesteps)
+        and torch.equal(orig_audio_mod.positions, ff_audio_mod.positions)
+        and torch.equal(orig_audio_mod.context, ff_audio_mod.context)
+    )
+
+    # --- Single transformer call with original Modality ---
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
+        video_pred, audio_pred = transformer(
+            video=orig_video_mod, audio=orig_audio_mod, perturbations=None,
+        )
+
+    # === PATH A: Original stepping ===
+    dv = to_denoised(video_state_A.latent, video_pred, orig_video_mod.timesteps)
+    da = to_denoised(audio_state_A.latent, audio_pred, orig_audio_mod.timesteps)
     dv = post_process_latent(dv, video_state_A.denoise_mask, video_state_A.clean_latent)
     da = post_process_latent(da, audio_state_A.denoise_mask, audio_state_A.clean_latent)
     video_state_A = replace(
@@ -246,146 +356,9 @@ for step_idx in range(n_steps):
         audio_state_A,
         latent=stepper.step(audio_state_A.latent, da, sigmas, step_idx),
     )
-    # Extract target-only latents (unpatchify from combined state)
-    target_5d_A = patchifier.unpatchify(
-        video_state_A.latent[:, :seq_target], target_shape,
-    )
-    orig_target_per_step.append(target_5d_A.clone())
-    orig_audio_per_step.append(audio_state_A.latent.clone())
-    print(f"  Step {step_idx}: sigma={sigmas[step_idx].item():.6f} → {sigmas[step_idx+1].item():.6f}")
+    orig_target_5d = patchifier.unpatchify(video_state_A.latent[:, :seq_target], target_shape)
 
-# Final result
-orig_final = video_tools_A.clear_conditioning(video_state_A)
-orig_final = video_tools_A.unpatchify(orig_final)
-print(f"  Final target latent: {orig_final.latent.shape}")
-
-# =====================================================================
-# PATH B: Flow-Factory denoising (replicates inference() + forward())
-# =====================================================================
-print("\n" + "=" * 60)
-print("PATH B: Flow-Factory denoising")
-print("=" * 60)
-
-gen_B = torch.Generator(device=DEVICE).manual_seed(SEED)
-
-# Replicate inference() noise generation
-target_zeros_5d = torch.zeros(
-    1, 128, F_lat, H_lat, W_lat, device=DEVICE, dtype=DTYPE,
-)
-target_zeros_3d = patchifier.patchify(target_zeros_5d)
-ref_latents_3d = patchifier.patchify(ref_latents)
-
-combined_3d = torch.cat([
-    target_zeros_3d, ref_latents_3d.to(dtype=DTYPE),
-], dim=1)
-
-noise_3d = torch.randn(
-    *combined_3d.shape, device=DEVICE, dtype=DTYPE, generator=gen_B,
-)
-
-denoise_mask = torch.cat([
-    torch.ones(1, seq_target, 1, device=DEVICE, dtype=DTYPE),
-    torch.zeros(1, seq_ref, 1, device=DEVICE, dtype=DTYPE),
-], dim=1)
-noised_3d = noise_3d * denoise_mask + combined_3d * (1 - denoise_mask)
-
-target_noised_3d = noised_3d[:, :seq_target]
-ff_latents = patchifier.unpatchify(target_noised_3d, target_shape)
-
-# Verify noise initialization matches
-_report("initial_noise", orig_target_per_step[0] if not orig_target_per_step else
-        patchifier.unpatchify(video_state_A.latent[:, :seq_target], target_shape) if False else ff_latents, ff_latents)
-
-# Initialize audio state (same generator, after video noise)
-audio_output_shape = VideoPixelShape(
-    batch=1, frames=NUM_FRAMES, width=WIDTH, height=HEIGHT, fps=FRAME_RATE,
-)
-audio_components = PipelineComponents(dtype=DTYPE, device=torch.device(DEVICE))
-audio_latent_shape = AudioLatentShape.from_video_pixel_shape(audio_output_shape)
-audio_tools_B = AudioLatentTools(audio_components.audio_patchifier, audio_latent_shape)
-audio_noiser_B = GaussianNoiser(generator=gen_B)
-audio_state_B = audio_noiser_B(
-    audio_tools_B.create_initial_state(DEVICE, DTYPE), noise_scale=1.0,
-)
-audio_latent = audio_state_B.latent
-audio_positions = audio_state_B.positions
-audio_denoise_mask = audio_state_B.denoise_mask
-
-print(f"  FF latents: {ff_latents.shape}")
-print(f"  FF audio: {audio_latent.shape}")
-
-# Set up FF scheduler
-ff_sched = LTXSDEScheduler(
-    num_inference_steps=n_steps, dynamics_type="ODE", noise_level=0.0, use_distilled=True,
-)
-ff_sched.set_timesteps(n_steps, device=DEVICE)
-ff_timesteps = ff_sched.timesteps
-
-# Build positions once (same as forward() does)
-fps = FRAME_RATE
-target_positions = patchifier.get_patch_grid_bounds(target_shape, device=DEVICE)
-target_positions = get_pixel_coords(
-    target_positions, VIDEO_SCALE_FACTORS, causal_fix=True,
-).float()
-target_positions[:, 0, ...] = target_positions[:, 0, ...] / fps
-target_positions = target_positions.to(dtype=torch.bfloat16)
-
-ref_positions = patchifier.get_patch_grid_bounds(ref_shape_5d, device=DEVICE)
-ref_positions = get_pixel_coords(
-    ref_positions, VIDEO_SCALE_FACTORS, causal_fix=True,
-)
-ref_positions = ref_positions.to(dtype=torch.float32)
-ref_positions[:, 0, ...] = ref_positions[:, 0, ...] / fps
-if dsf != 1:
-    ref_positions = ref_positions.clone()
-    ref_positions[:, 1, ...] *= dsf
-    ref_positions[:, 2, ...] *= dsf
-positions = torch.cat([target_positions, ref_positions], dim=2)
-
-ff_ref_ts = torch.zeros(1, seq_ref, 1, device=DEVICE, dtype=torch.float32)
-
-ff_target_per_step = []
-ff_audio_per_step = []
-for step_idx in range(n_steps):
-    sigma_val = sigmas[step_idx]
-    sigma_batch = sigma_val.view(1)
-
-    # Build video Modality
-    ff_target_3d = patchifier.patchify(ff_latents)
-    ff_combined = torch.cat([ff_target_3d, ref_latents_3d.to(dtype=DTYPE)], dim=1)
-
-    ff_target_ts = sigma_batch.view(1, 1, 1).expand(1, seq_target, 1)
-    ff_per_token_ts = torch.cat([ff_target_ts, ff_ref_ts], dim=1)
-
-    ff_modality = Modality(
-        enabled=True,
-        latent=ff_combined,
-        sigma=sigma_batch,
-        timesteps=ff_per_token_ts,
-        positions=positions,
-        context=video_context,
-        context_mask=None,
-    )
-
-    # Build audio Modality
-    audio_ts = audio_denoise_mask * sigma_batch.view(1, 1, 1)
-    audio_modality = Modality(
-        enabled=True,
-        latent=audio_latent,
-        sigma=sigma_batch,
-        timesteps=audio_ts,
-        positions=audio_positions,
-        context=audio_context,
-        context_mask=None,
-    )
-
-    # Transformer forward
-    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=DTYPE):
-        video_pred, audio_pred = transformer(
-            video=ff_modality, audio=audio_modality, perturbations=None,
-        )
-
-    # Step video (using FF scheduler on target only)
+    # === PATH B: Flow-Factory stepping ===
     target_v_3d = video_pred[:, :seq_target]
     target_v_5d = patchifier.unpatchify(target_v_3d, target_shape)
 
@@ -402,44 +375,50 @@ for step_idx in range(n_steps):
     )
     ff_latents = out.next_latents
 
-    # Step audio (using EulerDiffusionStep, matching original)
-    audio_denoised = to_denoised(audio_latent, audio_pred, audio_ts)
-    audio_clean = torch.zeros_like(audio_latent)
-    audio_denoised = (
-        audio_denoised * audio_denoise_mask + audio_clean * (1 - audio_denoise_mask)
-    )
-    all_sigmas = torch.cat([
-        sigmas, torch.zeros(1, device=DEVICE, dtype=sigmas.dtype),
-    ])
-    audio_latent = EulerDiffusionStep().step(
-        audio_latent, audio_denoised, all_sigmas, step_idx,
+    # Audio stepping (FF uses EulerDiffusionStep same as original)
+    audio_denoised = to_denoised(ff_audio_latent, audio_pred, audio_ts)
+    audio_clean = torch.zeros_like(ff_audio_latent)
+    audio_denoised = audio_denoised * audio_denoise_mask + audio_clean * (1 - audio_denoise_mask)
+    all_sigmas = torch.cat([sigmas, torch.zeros(1, device=DEVICE, dtype=sigmas.dtype)])
+    ff_audio_latent = EulerDiffusionStep().step(
+        ff_audio_latent, audio_denoised, all_sigmas, step_idx,
     )
 
-    ff_target_per_step.append(ff_latents.clone())
-    ff_audio_per_step.append(audio_latent.clone())
-    print(f"  Step {step_idx}: sigma={sigmas[step_idx].item():.6f} → {sigmas[step_idx+1].item():.6f}")
+    # --- Compare ---
+    video_match = torch.equal(orig_target_5d, ff_latents)
+    audio_match = torch.equal(audio_state_A.latent, ff_audio_latent)
 
+    if inputs_match and video_match and audio_match:
+        print(f"  Step {step_idx}: OK (sigma={sigma_val.item():.6f})")
+    else:
+        print(f"  Step {step_idx}: MISMATCH (sigma={sigma_val.item():.6f})")
+        if not inputs_match:
+            _report(f"    video_latent", orig_video_mod.latent, ff_video_mod.latent)
+            _report(f"    video_timesteps", orig_video_mod.timesteps, ff_video_mod.timesteps)
+            _report(f"    video_positions", orig_video_mod.positions, ff_video_mod.positions)
+            _report(f"    audio_latent", orig_audio_mod.latent, ff_audio_mod.latent)
+            _report(f"    audio_timesteps", orig_audio_mod.timesteps, ff_audio_mod.timesteps)
+            _report(f"    audio_positions", orig_audio_mod.positions, ff_audio_mod.positions)
+        if not video_match:
+            _report(f"    step_{step_idx}_video_output", orig_target_5d, ff_latents)
+        if not audio_match:
+            _report(f"    step_{step_idx}_audio_output", audio_state_A.latent, ff_audio_latent)
+        break
 
 # =====================================================================
-# COMPARISON
+# 6. Final comparison
 # =====================================================================
-print("\n" + "=" * 60)
-print("STEP-BY-STEP COMPARISON")
-print("=" * 60)
-
-for i in range(n_steps):
-    _report(f"step_{i}_video", orig_target_per_step[i], ff_target_per_step[i])
-    _report(f"step_{i}_audio", orig_audio_per_step[i], ff_audio_per_step[i])
-
 print("\n" + "=" * 60)
 print("FINAL COMPARISON")
 print("=" * 60)
 
+orig_final = video_tools_A.clear_conditioning(video_state_A)
+orig_final = video_tools_A.unpatchify(orig_final)
 _report("final_latents", orig_final.latent, ff_latents)
 
 if all_passed:
     print("\n  *** END-TO-END PARITY VERIFIED — BITWISE IDENTICAL ***")
-    print("  (Real data: RealisDance-Val, same model, same seed, same everything)")
+    print("  (Real data: RealisDance-Val, same model, same seed, same conditions)")
 else:
     print("\n  *** PARITY FAILED ***")
 
