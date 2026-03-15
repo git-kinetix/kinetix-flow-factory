@@ -63,6 +63,9 @@ class LTXUnionAdapter(BaseAdapter):
         self.reference_downscale_factor: int = self.pipeline.config.get(
             "reference_downscale_factor", 1
         )
+        # LTX-2 standard frame rate — must match original ICLoraPipeline (24fps)
+        # for position parity. Configurable via training_args.fps.
+        self.pipeline.fps = getattr(self.config.training_args, "fps", 24.0)
 
     # ======================== Loading ========================
 
@@ -455,7 +458,7 @@ class LTXUnionAdapter(BaseAdapter):
         # (create_initial_state: get_pixel_coords→f32→/fps→to(bf16)),
         # ref positions stay f32 (VideoConditionByReferenceLatent: get_pixel_coords→f32→/fps).
         _, _, F_lat, H_lat, W_lat = latents.shape
-        fps = getattr(self.pipeline, "fps", 25.0)
+        fps = getattr(self.pipeline, "fps", 24.0)
 
         target_shape = VideoLatentShape(
             batch=batch_size, channels=128, frames=F_lat,
@@ -695,7 +698,7 @@ class LTXUnionAdapter(BaseAdapter):
 
         audio_output_shape = VideoPixelShape(
             batch=batch_size, frames=num_frames, width=width, height=height,
-            fps=getattr(self.pipeline, "fps", 25.0),
+            fps=getattr(self.pipeline, "fps", 24.0),
         )
         audio_components = PipelineComponents(
             dtype=torch.bfloat16, device=torch.device(device),
